@@ -1,0 +1,8 @@
+{
+  "name": "SEA Workbench",
+  "description": "Publication-grade scientific research workspace for Strong Electrostatic Adsorption (SEA) catalyst synthesis, PZC/uptake surveys, analytical records, and reproducible A4 reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
