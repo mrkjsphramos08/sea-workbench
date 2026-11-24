@@ -4,25 +4,48 @@ import { create } from 'zustand';
 import {
   APP_VERSION,
   ActiveModule,
+  AnalyticalAnalyte,
+  AnalyticalComparisonConfig,
   AnalyticalConfiguration,
+  AnalyticalFigureConfiguration,
+  AnalyticalQualityIssueCategory,
+  AnalyticalReviewRecord,
+  AnalyticalReviewStatus,
+  AnalyticalSession,
   BatchConfiguration,
   BenchChecklistItem,
   BenchLog,
   BenchTimerState,
+  CalibrationDataset,
   CalibrationStandard,
+  DataProvenance,
   DatasetComparisonConfig,
+  DilutionRecord,
   Experiment,
+  ExperimentActivityEvent,
+  ExperimentLifecycleEvent,
+  ExperimentSnapshot,
   ExperimentStatus,
+  ExperimentTemplate,
   ExperimentType,
   ExperimentalObservation,
   FigureConfiguration,
+  FinalizedReport,
+  ImportMappingTemplate,
+  InstrumentImportRecord,
   InstrumentMeasurement,
+  InstrumentType,
+  OverviewWorkspaceTab,
   Precursor,
   ReferencePzcMarker,
   ReplicateGroupMeta,
   ReportConfiguration,
   ResearchAnnotation,
+  ResearchMilestone,
+  ResearchPlanMetadata,
   ResearchProject,
+  ResearchTimer,
+  SampleRegistryNote,
   Support,
   SurveyAnalysisConfiguration,
   SurveyConfiguration,
@@ -32,25 +55,48 @@ import {
   WORKSPACE_SCHEMA_VERSION,
   WorkspaceStateData,
 } from '../domain/models/types';
+import { projectExperimentCompatibilityMirrors } from '../domain/models/projections';
 import {
+  buildAnalyticalAnalysisProvenance,
+  buildSurveyAnalysisProvenance,
+  createDefaultResearchPlan,
+  createExperimentSnapshotRecord,
+  restoreSnapshotAsIndependentExperiment,
+} from '../domain/calculations/workflowEngine';
+import {
+  createBlankAnalyticalSession,
   createBlankExperiment,
   createBlankSurveyDataset,
+  createDefaultExperimentTemplates,
   createInitialDemoWorkspace,
   createPrecursorSnapshot,
   createSupportSnapshot,
+  createSyntheticAnalyticalSession,
   createSyntheticDemoDataset,
+  duplicateAnalyticalSessionRecord,
   duplicateExperimentRecord,
   duplicateSurveyDatasetRecord,
   generateUniqueDatasetId,
   generateUniqueExperimentId,
+  generateUniqueSessionId,
   generateUuid,
 } from '../data/demo/demoWorkspace';
 import {
+  StorageDiagnostics,
+  computeStorageDiagnostics,
   loadWorkspaceFromStorage,
   saveWorkspaceToStorage,
 } from '../services/persistence/storage';
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+
+export interface NavigationContextState {
+  overviewTab: OverviewWorkspaceTab;
+  surveyTab: string | null;
+  analyticalTab: string | null;
+  highlightRecordId: string | null;
+  navigationNonce: number;
+}
 
 export interface WorkbenchStore extends WorkspaceStateData {
   activeModule: ActiveModule;
@@ -58,10 +104,26 @@ export interface WorkbenchStore extends WorkspaceStateData {
   saveStatus: SaveStatus;
   storageBytes: number;
   storageError: string | null;
+  storageDiagnostics: StorageDiagnostics | null;
+  navigationContext: NavigationContextState;
   statusBanner: {
     type: 'info' | 'warning' | 'error' | 'success';
     message: string;
   } | null;
+
+  // Phase 5 Cross-Module Navigation
+  navigateToContext: (target: {
+    module: ActiveModule;
+    experimentUuid?: string;
+    surveyDatasetId?: string;
+    analyticalSessionId?: string;
+    overviewTab?: OverviewWorkspaceTab;
+    surveyTab?: string;
+    analyticalTab?: string;
+    highlightRecordId?: string;
+  }) => void;
+  setOverviewTab: (tab: OverviewWorkspaceTab) => void;
+  markBackupExported: () => void;
 
   // Lifecycle & persistence
   hydrateFromStorage: () => void;
@@ -232,7 +294,220 @@ export interface WorkbenchStore extends WorkspaceStateData {
   ) => void;
   deleteResearchAnnotation: (uuid: string, annotationId: string) => void;
 
-  // Analytical (Dilution & Standards)
+  // Phase 4 Analytical Chemistry & Instrument Data Workspace
+  selectAnalyticalSession: (uuid: string, sessionId: string) => void;
+  createAnalyticalSession: (
+    uuid: string,
+    input: {
+      sessionId?: string;
+      title: string;
+      technique: InstrumentType;
+      customTechniqueName?: string;
+      analyst?: string;
+    }
+  ) => AnalyticalSession | null;
+  loadSyntheticAnalyticalSession: (
+    uuid: string,
+    technique: 'ICP-OES' | 'Flame AAS'
+  ) => AnalyticalSession | null;
+  updateAnalyticalSessionMeta: (
+    uuid: string,
+    sessionId: string,
+    patch: Partial<
+      Pick<
+        AnalyticalSession,
+        | 'sessionId'
+        | 'title'
+        | 'technique'
+        | 'customTechniqueName'
+        | 'instrumentManufacturer'
+        | 'instrumentModel'
+        | 'instrumentIdentifier'
+        | 'methodReference'
+        | 'analyst'
+        | 'analysisDate'
+        | 'matrixDescription'
+        | 'conditionsNote'
+        | 'observations'
+        | 'provenance'
+        | 'scientificReviewStatus'
+        | 'notes'
+        | 'status'
+      >
+    >
+  ) => void;
+  duplicateAnalyticalSession: (
+    uuid: string,
+    sessionId: string
+  ) => AnalyticalSession | null;
+  archiveAnalyticalSession: (uuid: string, sessionId: string) => void;
+  deleteAnalyticalSession: (uuid: string, sessionId: string) => void;
+
+  // Multi-Analyte Management
+  selectAnalyticalAnalyte: (uuid: string, analyteId: string) => void;
+  addAnalyticalAnalyte: (
+    uuid: string,
+    input: Omit<AnalyticalAnalyte, 'id'>
+  ) => AnalyticalAnalyte | null;
+  updateAnalyticalAnalyte: (
+    uuid: string,
+    analyteId: string,
+    patch: Partial<AnalyticalAnalyte>
+  ) => void;
+  deleteAnalyticalAnalyte: (uuid: string, analyteId: string) => void;
+
+  // Multi-Calibration Dataset Management
+  selectCalibrationDataset: (uuid: string, calId: string) => void;
+  createCalibrationDataset: (
+    uuid: string,
+    input: {
+      calibrationId?: string;
+      title: string;
+      analyteId: string | null;
+      concUnit: string;
+      responseUnit: string;
+      referenceMethod?: string;
+    }
+  ) => CalibrationDataset | null;
+  duplicateCalibrationDataset: (
+    uuid: string,
+    calId: string
+  ) => CalibrationDataset | null;
+  updateCalibrationDatasetMeta: (
+    uuid: string,
+    calId: string,
+    patch: Partial<
+      Pick<
+        CalibrationDataset,
+        | 'calibrationId'
+        | 'title'
+        | 'analyteId'
+        | 'referenceMethod'
+        | 'concUnit'
+        | 'responseUnit'
+        | 'analyst'
+        | 'analysisDate'
+        | 'provenance'
+        | 'notes'
+      >
+    >
+  ) => void;
+  deleteCalibrationDataset: (uuid: string, calId: string) => void;
+  addCalibrationStandardToDataset: (
+    uuid: string,
+    calId: string,
+    initial?: Partial<CalibrationStandard>
+  ) => void;
+  addCalibrationStandardsBulk: (
+    uuid: string,
+    calId: string,
+    standards: CalibrationStandard[]
+  ) => void;
+  updateCalibrationStandardInDataset: (
+    uuid: string,
+    calId: string,
+    stdId: string,
+    patch: Partial<CalibrationStandard>
+  ) => void;
+  deleteCalibrationStandardInDataset: (
+    uuid: string,
+    calId: string,
+    stdId: string
+  ) => void;
+
+  // Sample Measurements & Bulk Import
+  addAnalyticalSamplesBulk: (
+    uuid: string,
+    rows: InstrumentMeasurement[],
+    importRecord?: InstrumentImportRecord
+  ) => void;
+  duplicateAnalyticalSamples: (uuid: string, rowIds: string[]) => void;
+  bulkUpdateAnalyticalSamples: (
+    uuid: string,
+    rowIds: string[],
+    patch: Partial<InstrumentMeasurement>
+  ) => void;
+  deleteAnalyticalSamplesBulk: (uuid: string, rowIds: string[]) => void;
+
+  // Dilution Records
+  addDilutionRecord: (
+    uuid: string,
+    record: Omit<DilutionRecord, 'id'>
+  ) => void;
+  updateDilutionRecord: (
+    uuid: string,
+    recordId: string,
+    patch: Partial<DilutionRecord>
+  ) => void;
+  deleteDilutionRecord: (uuid: string, recordId: string) => void;
+
+  // Quality Review Workflow
+  updateAnalyticalReviewStatus: (
+    uuid: string,
+    input: {
+      issueKey: string;
+      category: AnalyticalQualityIssueCategory;
+      recordId: string;
+      recordLabel: string;
+      description: string;
+      provenance: DataProvenance;
+      status: AnalyticalReviewStatus;
+      researcherNotes: string;
+      author: string;
+    }
+  ) => void;
+
+  // Survey <-> Analytical Traceable Linkage
+  linkAnalyticalToSurveyMeasurement: (
+    uuid: string,
+    params: {
+      surveyDatasetId: string;
+      surveyMeasurementId: string;
+      stage: 'Initial' | 'Final';
+      instrumentMeasurementId: string;
+    }
+  ) => void;
+  unlinkAnalyticalFromSurveyMeasurement: (
+    uuid: string,
+    params: {
+      surveyDatasetId: string;
+      surveyMeasurementId: string;
+      stage: 'Initial' | 'Final';
+    }
+  ) => void;
+  applyAnalyticalValueToSurvey: (
+    uuid: string,
+    params: {
+      surveyDatasetId: string;
+      surveyMeasurementId: string;
+      stage: 'Initial' | 'Final';
+      effectiveConcPpm: number;
+    }
+  ) => void;
+
+  // Analytical Figure Studio & Cross-Session Comparison
+  updateAnalyticalFigureConfig: (
+    uuid: string,
+    patch: Partial<AnalyticalFigureConfiguration>
+  ) => void;
+  saveAnalyticalFigurePreset: (
+    uuid: string,
+    name?: string
+  ) => AnalyticalFigureConfiguration | null;
+  loadAnalyticalFigurePreset: (uuid: string, figureId: string) => void;
+  deleteAnalyticalFigurePreset: (uuid: string, figureId: string) => void;
+  updateAnalyticalComparison: (
+    uuid: string,
+    patch: Partial<AnalyticalComparisonConfig>
+  ) => void;
+
+  // Reusable Import Mapping Templates
+  saveImportMappingTemplate: (
+    template: Omit<ImportMappingTemplate, 'id' | 'createdAt'>
+  ) => ImportMappingTemplate;
+  deleteImportMappingTemplate: (templateId: string) => void;
+
+  // Legacy-compatible Analytical Actions (routed through active AnalyticalSession)
   updateAnalyticalConfig: (
     uuid: string,
     patch: Partial<AnalyticalConfiguration>
@@ -293,6 +568,103 @@ export interface WorkbenchStore extends WorkspaceStateData {
   updateSupport: (id: string, patch: Partial<Support>) => void;
   deleteSupport: (id: string) => void;
 
+  // Phase 5 Lifecycle, Research Planning & Templates
+  transitionExperimentStatus: (
+    uuid: string,
+    newStatus: ExperimentStatus,
+    explanation?: string,
+    options?: { createSnapshot?: boolean; snapshotName?: string }
+  ) => void;
+  updateResearchPlan: (
+    uuid: string,
+    patch: Partial<ResearchPlanMetadata>
+  ) => void;
+  addPlanDeviation: (
+    uuid: string,
+    deviation: {
+      description: string;
+      reason: string;
+      author?: string;
+    }
+  ) => void;
+  deletePlanDeviation: (uuid: string, deviationId: string) => void;
+  saveExperimentTemplate: (
+    template: Omit<ExperimentTemplate, 'id' | 'createdAt'>
+  ) => ExperimentTemplate;
+  deleteExperimentTemplate: (templateId: string) => void;
+  applyExperimentTemplate: (uuid: string, templateId: string) => void;
+
+  // Phase 5 Milestones & Multiple Independent Timers
+  addMilestone: (
+    uuid: string,
+    input: {
+      title: string;
+      description?: string;
+      plannedDateTime?: string;
+      linkedModule?: ActiveModule | null;
+      linkedRecordId?: string | null;
+      linkedRecordLabel?: string;
+    }
+  ) => void;
+  updateMilestone: (
+    uuid: string,
+    milestoneId: string,
+    patch: Partial<ResearchMilestone>
+  ) => void;
+  reorderMilestone: (
+    uuid: string,
+    milestoneId: string,
+    direction: 'up' | 'down'
+  ) => void;
+  duplicateMilestone: (uuid: string, milestoneId: string) => void;
+  setMilestoneStatus: (
+    uuid: string,
+    milestoneId: string,
+    status: ResearchMilestone['status']
+  ) => void;
+  deleteMilestone: (uuid: string, milestoneId: string) => void;
+  addResearchTimer: (
+    uuid: string,
+    input: {
+      name: string;
+      mode: 'elapsed' | 'countdown';
+      configuredDurationSec?: number;
+      linkedMilestoneId?: string | null;
+    }
+  ) => void;
+  updateResearchTimer: (
+    uuid: string,
+    timerId: string,
+    patch: Partial<ResearchTimer>,
+    historyNote?: {
+      action: ResearchTimer['history'][number]['action'];
+      detail: string;
+    }
+  ) => void;
+  deleteResearchTimer: (uuid: string, timerId: string) => void;
+
+  // Phase 5 Sample Registry, Snapshots & Finalized Reports
+  updateSampleRegistryNote: (uuid: string, note: SampleRegistryNote) => void;
+  createExperimentSnapshot: (
+    uuid: string,
+    input: { name: string; description?: string; researcher?: string }
+  ) => ExperimentSnapshot | null;
+  deleteExperimentSnapshot: (uuid: string, snapshotId: string) => void;
+  restoreExperimentSnapshot: (
+    sourceUuid: string,
+    snapshotId: string
+  ) => Experiment | null;
+  createFinalizedReport: (
+    uuid: string,
+    input: {
+      title: string;
+      notes?: string;
+      snapshotId?: string;
+      snapshotName?: string;
+    }
+  ) => FinalizedReport | null;
+  deleteFinalizedReport: (uuid: string, reportId: string) => void;
+
   // Workspace Import / Reset
   replaceWorkspace: (workspace: WorkspaceStateData) => void;
   getSerializableWorkspace: () => WorkspaceStateData;
@@ -307,6 +679,8 @@ function extractWorkspaceData(state: WorkbenchStore): WorkspaceStateData {
     activeExperimentUuid: state.activeExperimentUuid,
     precursors: state.precursors,
     supports: state.supports,
+    importMappingTemplates: state.importMappingTemplates ?? [],
+    experimentTemplates: state.experimentTemplates ?? [],
     preferences: state.preferences,
     hasInitializedDemo: state.hasInitializedDemo,
     lastSavedAt: state.lastSavedAt,
@@ -324,17 +698,20 @@ function schedulePersist(
   autoSaveTimer = setTimeout(() => {
     const data = extractWorkspaceData(get());
     const result = saveWorkspaceToStorage(data);
+    const diag = computeStorageDiagnostics(data);
     if (result.ok) {
       set({
         saveStatus: 'saved',
         lastSavedAt: result.savedAt,
         storageBytes: result.byteSize,
         storageError: null,
+        storageDiagnostics: diag,
       });
     } else {
       set({
         saveStatus: 'error',
         storageError: result.error,
+        storageDiagnostics: diag,
         statusBanner: {
           type: 'error',
           message: result.error ?? 'Failed to save workspace locally.',
@@ -393,13 +770,39 @@ function updateActiveSurveyDataset(
       ? (updatedTarget as SurveyDataset)
       : nextDatasets.find((d) => d.id === activeId)) ?? nextDatasets[0];
 
-  return {
+  return projectExperimentCompatibilityMirrors({
     ...exp,
     surveyDatasets: nextDatasets,
     activeSurveyDatasetId: activeDs?.id ?? null,
-    surveyConfig: activeDs ? activeDs.config : exp.surveyConfig,
-    surveyMeasurements: activeDs ? activeDs.measurements : exp.surveyMeasurements,
-  };
+  });
+}
+
+/**
+ * Updates the active (or specified) AnalyticalSession inside an experiment and
+ * projects all compatibility mirrors deterministically.
+ */
+function updateActiveAnalyticalSession(
+  exp: Experiment,
+  updater: (session: AnalyticalSession) => AnalyticalSession,
+  explicitSessionId?: string
+): Experiment {
+  const now = new Date().toISOString();
+  const targetId =
+    explicitSessionId ??
+    exp.activeAnalyticalSessionId ??
+    exp.analyticalSessions?.[0]?.id ??
+    null;
+
+  if (!targetId) return exp;
+
+  const nextSessions = (exp.analyticalSessions ?? []).map((sess) =>
+    sess.id === targetId ? { ...updater(sess), updatedAt: now } : sess
+  );
+
+  return projectExperimentCompatibilityMirrors({
+    ...exp,
+    analyticalSessions: nextSessions,
+  });
 }
 
 const initialBlankState: WorkspaceStateData = {
@@ -410,13 +813,32 @@ const initialBlankState: WorkspaceStateData = {
   activeExperimentUuid: null,
   precursors: [],
   supports: [],
+  importMappingTemplates: [],
+  experimentTemplates: [],
   preferences: {
     sidebarCollapsed: false,
     defaultResearcher: 'Research Scientist',
+    lastBackupExportedAt: null,
   },
   hasInitializedDemo: false,
   lastSavedAt: null,
 };
+
+function appendActivityEvent(
+  exp: Experiment,
+  event: Omit<ExperimentActivityEvent, 'id' | 'timestamp' | 'experimentUuid'>,
+  timestamp = new Date().toISOString()
+): ExperimentActivityEvent[] {
+  return [
+    {
+      ...event,
+      id: generateUuid('act'),
+      timestamp,
+      experimentUuid: exp.uuid,
+    },
+    ...(exp.activityEvents ?? []),
+  ].slice(0, 400);
+}
 
 export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
   ...initialBlankState,
@@ -425,7 +847,101 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
   saveStatus: 'idle',
   storageBytes: 0,
   storageError: null,
+  storageDiagnostics: null,
+  navigationContext: {
+    overviewTab: 'summary',
+    surveyTab: null,
+    analyticalTab: null,
+    highlightRecordId: null,
+    navigationNonce: 0,
+  },
   statusBanner: null,
+
+  navigateToContext: (target) => {
+    set((state) => {
+      const nextExpUuid =
+        target.experimentUuid &&
+        state.experiments.some((e) => e.uuid === target.experimentUuid)
+          ? target.experimentUuid
+          : state.activeExperimentUuid;
+
+      let nextExperiments = state.experiments;
+      if (
+        nextExpUuid &&
+        (target.surveyDatasetId || target.analyticalSessionId)
+      ) {
+        nextExperiments = state.experiments.map((exp) => {
+          if (exp.uuid !== nextExpUuid) return exp;
+          let updated = exp;
+          if (
+            target.surveyDatasetId &&
+            exp.surveyDatasets.some((d) => d.id === target.surveyDatasetId)
+          ) {
+            updated = {
+              ...updated,
+              activeSurveyDatasetId: target.surveyDatasetId,
+            };
+          }
+          if (
+            target.analyticalSessionId &&
+            exp.analyticalSessions.some(
+              (s) => s.id === target.analyticalSessionId
+            )
+          ) {
+            updated = {
+              ...updated,
+              activeAnalyticalSessionId: target.analyticalSessionId,
+            };
+          }
+          return updated === exp
+            ? exp
+            : projectExperimentCompatibilityMirrors(updated);
+        });
+      }
+
+      return {
+        experiments: nextExperiments,
+        activeExperimentUuid: nextExpUuid,
+        activeModule: target.module,
+        navigationContext: {
+          overviewTab: target.overviewTab ?? state.navigationContext.overviewTab,
+          surveyTab: target.surveyTab ?? state.navigationContext.surveyTab,
+          analyticalTab:
+            target.analyticalTab ?? state.navigationContext.analyticalTab,
+          highlightRecordId: target.highlightRecordId ?? null,
+          navigationNonce: state.navigationContext.navigationNonce + 1,
+        },
+      };
+    });
+    schedulePersist(get, set);
+  },
+
+  setOverviewTab: (tab) =>
+    set((state) => ({
+      navigationContext: {
+        ...state.navigationContext,
+        overviewTab: tab,
+      },
+    })),
+
+  markBackupExported: () => {
+    const now = new Date().toISOString();
+    set((state) => {
+      const nextPrefs = {
+        ...state.preferences,
+        lastBackupExportedAt: now,
+      };
+      const nextData = {
+        ...extractWorkspaceData(state),
+        preferences: nextPrefs,
+      };
+      return {
+        preferences: nextPrefs,
+        storageDiagnostics: computeStorageDiagnostics(nextData),
+      };
+    });
+    schedulePersist(get, set);
+  },
 
   hydrateFromStorage: () => {
     if (get().hydrated) return;
@@ -448,14 +964,24 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
         }
       }
 
-      set({
+      const normalizedLoaded: WorkspaceStateData = {
         ...loaded.data,
+        experimentTemplates:
+          loaded.data.experimentTemplates &&
+          loaded.data.experimentTemplates.length > 0
+            ? loaded.data.experimentTemplates
+            : createDefaultExperimentTemplates(),
+      };
+
+      set({
+        ...normalizedLoaded,
         activeExperimentUuid: validActive,
         hydrated: true,
         saveStatus: 'saved',
         lastSavedAt: savedAt,
         storageBytes: byteSize,
         storageError: null,
+        storageDiagnostics: computeStorageDiagnostics(normalizedLoaded),
         statusBanner:
           loaded.warnings.length > 0
             ? {
@@ -475,6 +1001,7 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
         saveStatus: 'error',
         storageBytes: loaded.byteSize,
         storageError: loaded.error,
+        storageDiagnostics: computeStorageDiagnostics(demo),
         statusBanner: {
           type: 'error',
           message:
@@ -493,6 +1020,7 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
       lastSavedAt: persisted.savedAt ?? demo.lastSavedAt,
       storageBytes: persisted.byteSize,
       storageError: persisted.error,
+      storageDiagnostics: computeStorageDiagnostics(demo),
     });
   },
 
@@ -503,12 +1031,14 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
     }
     const data = extractWorkspaceData(get());
     const result = saveWorkspaceToStorage(data);
+    const diag = computeStorageDiagnostics(data);
     if (result.ok) {
       set({
         saveStatus: 'saved',
         lastSavedAt: result.savedAt,
         storageBytes: result.byteSize,
         storageError: null,
+        storageDiagnostics: diag,
         statusBanner: {
           type: 'success',
           message: 'Workspace saved to local browser storage.',
@@ -519,6 +1049,7 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
     set({
       saveStatus: 'error',
       storageError: result.error,
+      storageDiagnostics: diag,
       statusBanner: {
         type: 'error',
         message: result.error ?? 'Failed to save workspace locally.',
@@ -1262,7 +1793,7 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
     );
     if (!ds) return null;
     const now = new Date().toISOString();
-    const saved: FigureConfiguration = {
+    const baseSaved: FigureConfiguration = {
       ...structuredClone(ds.figureConfig),
       id: generateUuid('fig'),
       name:
@@ -1271,17 +1802,40 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
         `Saved Figure ${ds.savedFigures.length + 1}`,
       savedAt: now,
     };
+    const saved: FigureConfiguration = {
+      ...baseSaved,
+      analysisProvenance: {
+        ...buildSurveyAnalysisProvenance(exp, ds),
+        capturedAt: now,
+      },
+    };
 
     set((state) => ({
-      experiments: updateExperimentInList(state.experiments, uuid, (e) =>
-        updateActiveSurveyDataset(e, (activeDs) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) => {
+        const updated = updateActiveSurveyDataset(e, (activeDs) => ({
           ...activeDs,
           savedFigures: [...activeDs.savedFigures, saved],
-        }))
-      ),
+        }));
+        return {
+          ...updated,
+          activityEvents: appendActivityEvent(
+            updated,
+            {
+              module: 'uptake-survey',
+              eventType: 'figure_saved',
+              sourceKind: 'survey_figure',
+              sourceId: saved.id,
+              sourceLabel: saved.name,
+              author: e.researcher || 'Research Scientist',
+              description: `Saved survey figure "${saved.name}" on dataset ${ds.datasetId}.`,
+            },
+            now
+          ),
+        };
+      }),
       statusBanner: {
         type: 'success',
-        message: `Saved figure configuration "${saved.name}".`,
+        message: `Saved reproducible figure configuration "${saved.name}".`,
       },
     }));
     schedulePersist(get, set);
@@ -1383,125 +1937,1095 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
   },
 
   /* ==========================================================================
-   * ANALYTICAL, BENCH, REPORT & DATABASES (Preserved from Phases 1 & 2)
+   * PHASE 4 ANALYTICAL CHEMISTRY & INSTRUMENT DATA WORKSPACE
+   * ========================================================================== */
+
+  selectAnalyticalSession: (uuid, sessionId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        if (!exp.analyticalSessions.some((s) => s.id === sessionId)) return exp;
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          activeAnalyticalSessionId: sessionId,
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  createAnalyticalSession: (uuid, input) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    if (!exp) return null;
+    const sessionCode =
+      input.sessionId?.trim() ||
+      generateUniqueSessionId(exp.analyticalSessions ?? [], input.technique);
+    const created = createBlankAnalyticalSession({
+      experimentUuid: exp.uuid,
+      sessionId: sessionCode,
+      title: input.title,
+      technique: input.technique,
+      customTechniqueName: input.customTechniqueName,
+      analyst: input.analyst?.trim() || exp.researcher || get().preferences.defaultResearcher,
+      analysisDate: exp.experimentDate,
+    });
+
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) =>
+        projectExperimentCompatibilityMirrors({
+          ...e,
+          analyticalSessions: [...(e.analyticalSessions ?? []), created],
+          activeAnalyticalSessionId: created.id,
+        })
+      ),
+      statusBanner: {
+        type: 'success',
+        message: `Created analytical session ${created.sessionId} (${created.title}).`,
+      },
+    }));
+    schedulePersist(get, set);
+    return created;
+  },
+
+  loadSyntheticAnalyticalSession: (uuid, technique) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    if (!exp) return null;
+    const demoSess = createSyntheticAnalyticalSession({
+      experimentUuid: exp.uuid,
+      technique,
+      existingSessions: exp.analyticalSessions ?? [],
+      analyst: exp.researcher || 'Demo Analyst',
+    });
+
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) =>
+        projectExperimentCompatibilityMirrors({
+          ...e,
+          analyticalSessions: [...(e.analyticalSessions ?? []), demoSess],
+          activeAnalyticalSessionId: demoSess.id,
+        })
+      ),
+      statusBanner: {
+        type: 'info',
+        message: `Loaded synthetic demonstration session ${demoSess.sessionId} (${technique}).`,
+      },
+    }));
+    schedulePersist(get, set);
+    return demoSess;
+  },
+
+  updateAnalyticalSessionMeta: (uuid, sessionId, patch) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(
+          exp,
+          (sess) => ({ ...sess, ...patch }),
+          sessionId
+        )
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  duplicateAnalyticalSession: (uuid, sessionId) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    if (!exp) return null;
+    const source = (exp.analyticalSessions ?? []).find((s) => s.id === sessionId);
+    if (!source) return null;
+    const { session: copy } = duplicateAnalyticalSessionRecord(
+      source,
+      exp.analyticalSessions ?? []
+    );
+
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) =>
+        projectExperimentCompatibilityMirrors({
+          ...e,
+          analyticalSessions: [...(e.analyticalSessions ?? []), copy],
+          activeAnalyticalSessionId: copy.id,
+        })
+      ),
+      statusBanner: {
+        type: 'info',
+        message: `Created independent analytical session duplicate ${copy.sessionId}.`,
+      },
+    }));
+    schedulePersist(get, set);
+    return copy;
+  },
+
+  archiveAnalyticalSession: (uuid, sessionId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(
+          exp,
+          (sess) => ({
+            ...sess,
+            status: sess.status === 'Archived' ? 'Active' : 'Archived',
+          }),
+          sessionId
+        )
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteAnalyticalSession: (uuid, sessionId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const remaining = (exp.analyticalSessions ?? []).filter(
+          (s) => s.id !== sessionId
+        );
+        const nextActive =
+          exp.activeAnalyticalSessionId === sessionId
+            ? remaining[0]?.id ?? null
+            : exp.activeAnalyticalSessionId;
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          analyticalSessions: remaining,
+          activeAnalyticalSessionId: nextActive,
+          analyticalComparison: {
+            ...exp.analyticalComparison,
+            selectedSessionIds: (
+              exp.analyticalComparison?.selectedSessionIds ?? []
+            ).filter((id) => id !== sessionId),
+          },
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  selectAnalyticalAnalyte: (uuid, analyteId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => {
+          const target = sess.analytes.find((a) => a.id === analyteId);
+          if (!target) return sess;
+          return {
+            ...sess,
+            activeAnalyteId: target.id,
+            activeCalibrationDatasetId:
+              target.calibrationDatasetId &&
+              sess.calibrationDatasets.some(
+                (c) => c.id === target.calibrationDatasetId
+              )
+                ? target.calibrationDatasetId
+                : sess.activeCalibrationDatasetId,
+          };
+        })
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  addAnalyticalAnalyte: (uuid, input) => {
+    const record: AnalyticalAnalyte = {
+      ...input,
+      id: generateUuid('an'),
+    };
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          analytes: [...sess.analytes, record],
+          activeAnalyteId: record.id,
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+    return record;
+  },
+
+  updateAnalyticalAnalyte: (uuid, analyteId, patch) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          analytes: sess.analytes.map((a) =>
+            a.id === analyteId ? { ...a, ...patch } : a
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteAnalyticalAnalyte: (uuid, analyteId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => {
+          const remaining = sess.analytes.filter((a) => a.id !== analyteId);
+          return {
+            ...sess,
+            analytes: remaining,
+            activeAnalyteId:
+              sess.activeAnalyteId === analyteId
+                ? remaining[0]?.id ?? null
+                : sess.activeAnalyteId,
+          };
+        })
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  selectCalibrationDataset: (uuid, calId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          activeCalibrationDatasetId: sess.calibrationDatasets.some(
+            (c) => c.id === calId
+          )
+            ? calId
+            : sess.activeCalibrationDatasetId,
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  createCalibrationDataset: (uuid, input) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    const sess = exp?.analyticalSessions.find(
+      (s) => s.id === exp.activeAnalyticalSessionId
+    );
+    if (!exp || !sess) return null;
+
+    const now = new Date().toISOString();
+    const seq = sess.calibrationDatasets.length + 1;
+    const cal: CalibrationDataset = {
+      id: generateUuid('calds'),
+      calibrationId:
+        input.calibrationId?.trim() || `CAL-${String(seq).padStart(2, '0')}`,
+      title: input.title.trim() || `Calibration Dataset ${seq}`,
+      sessionId: sess.id,
+      analyteId: input.analyteId,
+      referenceMethod: input.referenceMethod?.trim() ?? '',
+      concUnit: input.concUnit.trim() || 'ppm',
+      responseUnit: input.responseUnit.trim() || 'cps',
+      analyst: sess.analyst || exp.researcher,
+      analysisDate: sess.analysisDate || exp.experimentDate,
+      provenance: 'user_entered',
+      standards: [],
+      notes: '',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) =>
+        updateActiveAnalyticalSession(e, (s) => ({
+          ...s,
+          calibrationDatasets: [...s.calibrationDatasets, cal],
+          activeCalibrationDatasetId: cal.id,
+          analytes: s.analytes.map((a) =>
+            a.id === input.analyteId && !a.calibrationDatasetId
+              ? { ...a, calibrationDatasetId: cal.id }
+              : a
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+    return cal;
+  },
+
+  duplicateCalibrationDataset: (uuid, calId) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    const sess = exp?.analyticalSessions.find(
+      (s) => s.id === exp.activeAnalyticalSessionId
+    );
+    const source = sess?.calibrationDatasets.find((c) => c.id === calId);
+    if (!exp || !sess || !source) return null;
+
+    const now = new Date().toISOString();
+    const copy: CalibrationDataset = {
+      ...structuredClone(source),
+      id: generateUuid('calds'),
+      calibrationId: `${source.calibrationId}-COPY`,
+      title: `${source.title} (Copy)`,
+      standards: source.standards.map((s) => ({
+        ...structuredClone(s),
+        id: generateUuid('cal'),
+      })),
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) =>
+        updateActiveAnalyticalSession(e, (s) => ({
+          ...s,
+          calibrationDatasets: [...s.calibrationDatasets, copy],
+          activeCalibrationDatasetId: copy.id,
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+    return copy;
+  },
+
+  updateCalibrationDatasetMeta: (uuid, calId, patch) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          calibrationDatasets: sess.calibrationDatasets.map((c) =>
+            c.id === calId ? { ...c, ...patch, updatedAt: now } : c
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteCalibrationDataset: (uuid, calId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => {
+          const remaining = sess.calibrationDatasets.filter(
+            (c) => c.id !== calId
+          );
+          return {
+            ...sess,
+            calibrationDatasets: remaining,
+            activeCalibrationDatasetId:
+              sess.activeCalibrationDatasetId === calId
+                ? remaining[0]?.id ?? null
+                : sess.activeCalibrationDatasetId,
+          };
+        })
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  addCalibrationStandardToDataset: (uuid, calId, initial) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          calibrationDatasets: sess.calibrationDatasets.map((c) => {
+            if (c.id !== calId) return c;
+            const nextNum = c.standards.length + 1;
+            const std: CalibrationStandard = {
+              id: generateUuid('cal'),
+              standardId:
+                initial?.standardId ?? `CAL-${String(nextNum).padStart(2, '0')}`,
+              analyteId: initial?.analyteId ?? c.analyteId,
+              isBlank: initial?.isBlank ?? false,
+              replicateGroupId: initial?.replicateGroupId,
+              nominalConc: initial?.nominalConc ?? null,
+              unit: initial?.unit ?? c.concUnit ?? 'ppm',
+              instrumentResponse: initial?.instrumentResponse ?? null,
+              responseUnit: initial?.responseUnit ?? c.responseUnit ?? 'cps',
+              replicateNumber: initial?.replicateNumber ?? 1,
+              provenance: initial?.provenance ?? 'user_entered',
+              qualityStatus: initial?.qualityStatus ?? 'valid',
+              exclusionReason: initial?.exclusionReason,
+              notes: initial?.notes ?? '',
+            };
+            return {
+              ...c,
+              standards: [...c.standards, std],
+              updatedAt: now,
+            };
+          }),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  addCalibrationStandardsBulk: (uuid, calId, standards) => {
+    if (standards.length === 0) return;
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          calibrationDatasets: sess.calibrationDatasets.map((c) =>
+            c.id === calId
+              ? {
+                  ...c,
+                  standards: [...c.standards, ...standards],
+                  updatedAt: now,
+                }
+              : c
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateCalibrationStandardInDataset: (uuid, calId, stdId, patch) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          calibrationDatasets: sess.calibrationDatasets.map((c) =>
+            c.id === calId
+              ? {
+                  ...c,
+                  standards: c.standards.map((s) =>
+                    s.id === stdId ? { ...s, ...patch } : s
+                  ),
+                  updatedAt: now,
+                }
+              : c
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteCalibrationStandardInDataset: (uuid, calId, stdId) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          calibrationDatasets: sess.calibrationDatasets.map((c) =>
+            c.id === calId
+              ? {
+                  ...c,
+                  standards: c.standards.filter((s) => s.id !== stdId),
+                  updatedAt: now,
+                }
+              : c
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  addAnalyticalSamplesBulk: (uuid, rows, importRecord) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          sampleMeasurements: [
+            ...sess.sampleMeasurements,
+            ...rows.map((r) => ({
+              ...r,
+              id: r.id || generateUuid('im'),
+              sessionId: sess.id,
+            })),
+          ],
+          importHistory: importRecord
+            ? [importRecord, ...sess.importHistory]
+            : sess.importHistory,
+        }))
+      ),
+      statusBanner: importRecord
+        ? {
+            type: 'success',
+            message: `Imported ${rows.length} analytical measurement row(s) from ${importRecord.filename}.`,
+          }
+        : state.statusBanner,
+    }));
+    schedulePersist(get, set);
+  },
+
+  duplicateAnalyticalSamples: (uuid, rowIds) => {
+    if (rowIds.length === 0) return;
+    const idSet = new Set(rowIds);
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => {
+          const copies: InstrumentMeasurement[] = [];
+          for (const row of sess.sampleMeasurements) {
+            if (!idSet.has(row.id)) continue;
+            copies.push({
+              ...structuredClone(row),
+              id: generateUuid('im'),
+              sampleId: `${row.sampleId}-COPY`,
+              replicateId: row.replicateId === 'R1' ? 'R2' : `${row.replicateId}b`,
+              linkedSurveyDatasetId: null,
+              linkedSurveyMeasurementId: null,
+            });
+          }
+          return {
+            ...sess,
+            sampleMeasurements: [...sess.sampleMeasurements, ...copies],
+          };
+        })
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  bulkUpdateAnalyticalSamples: (uuid, rowIds, patch) => {
+    if (rowIds.length === 0) return;
+    const idSet = new Set(rowIds);
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          sampleMeasurements: sess.sampleMeasurements.map((m) =>
+            idSet.has(m.id) ? { ...m, ...patch } : m
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteAnalyticalSamplesBulk: (uuid, rowIds) => {
+    if (rowIds.length === 0) return;
+    const idSet = new Set(rowIds);
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          sampleMeasurements: sess.sampleMeasurements.filter(
+            (m) => !idSet.has(m.id)
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  addDilutionRecord: (uuid, record) => {
+    const newRec: DilutionRecord = {
+      ...record,
+      id: generateUuid('dil'),
+    };
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          dilutionRecords: [...sess.dilutionRecords, newRec],
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateDilutionRecord: (uuid, recordId, patch) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          dilutionRecords: sess.dilutionRecords.map((d) =>
+            d.id === recordId ? { ...d, ...patch } : d
+          ),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteDilutionRecord: (uuid, recordId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          dilutionRecords: sess.dilutionRecords.filter((d) => d.id !== recordId),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateAnalyticalReviewStatus: (uuid, input) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => {
+          const existing = sess.reviewRecords.find(
+            (r) => r.issueKey === input.issueKey
+          );
+          const historyEntry = {
+            timestamp: now,
+            status: input.status,
+            author: input.author || sess.analyst || exp.researcher,
+            note: input.researcherNotes.trim(),
+          };
+          if (existing) {
+            return {
+              ...sess,
+              reviewRecords: sess.reviewRecords.map((r) =>
+                r.issueKey === input.issueKey
+                  ? {
+                      ...r,
+                      status: input.status,
+                      researcherNotes: input.researcherNotes,
+                      history: [historyEntry, ...r.history],
+                    }
+                  : r
+              ),
+            };
+          }
+          const created: AnalyticalReviewRecord = {
+            id: generateUuid('rev'),
+            issueKey: input.issueKey,
+            category: input.category,
+            sessionId: sess.id,
+            recordId: input.recordId,
+            recordLabel: input.recordLabel,
+            description: input.description,
+            provenance: input.provenance,
+            identifiedAt: now,
+            status: input.status,
+            researcherNotes: input.researcherNotes,
+            history: [historyEntry],
+          };
+          return {
+            ...sess,
+            reviewRecords: [created, ...sess.reviewRecords],
+          };
+        })
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  linkAnalyticalToSurveyMeasurement: (uuid, params) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const now = new Date().toISOString();
+        let surveyLabel = '';
+        const nextDatasets = exp.surveyDatasets.map((ds) => {
+          if (ds.id !== params.surveyDatasetId) return ds;
+          return {
+            ...ds,
+            updatedAt: now,
+            measurements: ds.measurements.map((m) => {
+              if (m.id !== params.surveyMeasurementId) return m;
+              surveyLabel = m.sampleId;
+              return params.stage === 'Initial'
+                ? {
+                    ...m,
+                    linkedInitialMeasurementId: params.instrumentMeasurementId,
+                  }
+                : {
+                    ...m,
+                    linkedFinalMeasurementId: params.instrumentMeasurementId,
+                  };
+            }),
+          };
+        });
+
+        const nextSessions = exp.analyticalSessions.map((sess) => ({
+          ...sess,
+          sampleMeasurements: sess.sampleMeasurements.map((im) =>
+            im.id === params.instrumentMeasurementId
+              ? {
+                  ...im,
+                  linkedSurveyDatasetId: params.surveyDatasetId,
+                  linkedSurveyMeasurementId: params.surveyMeasurementId,
+                  linkedSurveySampleId: surveyLabel || im.linkedSurveySampleId,
+                }
+              : im
+          ),
+        }));
+
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          surveyDatasets: nextDatasets,
+          analyticalSessions: nextSessions,
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  unlinkAnalyticalFromSurveyMeasurement: (uuid, params) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const now = new Date().toISOString();
+        let removedInstrumentId: string | null = null;
+        const nextDatasets = exp.surveyDatasets.map((ds) => {
+          if (ds.id !== params.surveyDatasetId) return ds;
+          return {
+            ...ds,
+            updatedAt: now,
+            measurements: ds.measurements.map((m) => {
+              if (m.id !== params.surveyMeasurementId) return m;
+              if (params.stage === 'Initial') {
+                removedInstrumentId = m.linkedInitialMeasurementId;
+                return { ...m, linkedInitialMeasurementId: null };
+              }
+              removedInstrumentId = m.linkedFinalMeasurementId;
+              return { ...m, linkedFinalMeasurementId: null };
+            }),
+          };
+        });
+
+        const nextSessions = exp.analyticalSessions.map((sess) => ({
+          ...sess,
+          sampleMeasurements: sess.sampleMeasurements.map((im) =>
+            im.id === removedInstrumentId
+              ? {
+                  ...im,
+                  linkedSurveyDatasetId: null,
+                  linkedSurveyMeasurementId: null,
+                }
+              : im
+          ),
+        }));
+
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          surveyDatasets: nextDatasets,
+          analyticalSessions: nextSessions,
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  applyAnalyticalValueToSurvey: (uuid, params) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const now = new Date().toISOString();
+        const rounded = Number(params.effectiveConcPpm.toFixed(4));
+        const nextDatasets = exp.surveyDatasets.map((ds) => {
+          if (ds.id !== params.surveyDatasetId) return ds;
+          return {
+            ...ds,
+            updatedAt: now,
+            measurements: ds.measurements.map((m) => {
+              if (m.id !== params.surveyMeasurementId) return m;
+              return params.stage === 'Initial'
+                ? { ...m, initialConcPpm: rounded }
+                : { ...m, finalConcPpm: rounded };
+            }),
+          };
+        });
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          surveyDatasets: nextDatasets,
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateAnalyticalFigureConfig: (uuid, patch) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          figureConfig: {
+            ...sess.figureConfig,
+            ...patch,
+            savedAt: new Date().toISOString(),
+          },
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  saveAnalyticalFigurePreset: (uuid, name) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    const sess = exp?.analyticalSessions.find(
+      (s) => s.id === exp.activeAnalyticalSessionId
+    );
+    if (!exp || !sess) return null;
+    const now = new Date().toISOString();
+    const baseSaved: AnalyticalFigureConfiguration = {
+      ...structuredClone(sess.figureConfig),
+      id: generateUuid('afig'),
+      name:
+        name?.trim() ||
+        sess.figureConfig.name.trim() ||
+        `Analytical Figure ${sess.savedFigures.length + 1}`,
+      savedAt: now,
+    };
+    const saved: AnalyticalFigureConfiguration = {
+      ...baseSaved,
+      analysisProvenance: {
+        ...buildAnalyticalAnalysisProvenance(exp, sess),
+        capturedAt: now,
+      },
+    };
+
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) => {
+        const updated = updateActiveAnalyticalSession(e, (s) => ({
+          ...s,
+          savedFigures: [...s.savedFigures, saved],
+        }));
+        return {
+          ...updated,
+          activityEvents: appendActivityEvent(
+            updated,
+            {
+              module: 'analytical',
+              eventType: 'figure_saved',
+              sourceKind: 'analytical_figure',
+              sourceId: saved.id,
+              sourceLabel: saved.name,
+              author: e.researcher || 'Research Scientist',
+              description: `Saved analytical figure "${saved.name}" on session ${sess.sessionId}.`,
+            },
+            now
+          ),
+        };
+      }),
+      statusBanner: {
+        type: 'success',
+        message: `Saved reproducible analytical figure preset "${saved.name}".`,
+      },
+    }));
+    schedulePersist(get, set);
+    return saved;
+  },
+
+  loadAnalyticalFigurePreset: (uuid, figureId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => {
+          const found = sess.savedFigures.find((f) => f.id === figureId);
+          if (!found) return sess;
+          return {
+            ...sess,
+            figureConfig: structuredClone(found),
+          };
+        })
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteAnalyticalFigurePreset: (uuid, figureId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => ({
+          ...sess,
+          savedFigures: sess.savedFigures.filter((f) => f.id !== figureId),
+        }))
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateAnalyticalComparison: (uuid, patch) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
+        ...exp,
+        analyticalComparison: { ...exp.analyticalComparison, ...patch },
+      })),
+    }));
+    schedulePersist(get, set);
+  },
+
+  saveImportMappingTemplate: (template) => {
+    const created: ImportMappingTemplate = {
+      ...template,
+      id: generateUuid('tmpl'),
+      createdAt: new Date().toISOString(),
+    };
+    set((state) => ({
+      importMappingTemplates: [
+        created,
+        ...(state.importMappingTemplates ?? []),
+      ],
+      statusBanner: {
+        type: 'success',
+        message: `Saved reusable import template "${created.name}".`,
+      },
+    }));
+    schedulePersist(get, set);
+    return created;
+  },
+
+  deleteImportMappingTemplate: (templateId) => {
+    set((state) => ({
+      importMappingTemplates: (state.importMappingTemplates ?? []).filter(
+        (t) => t.id !== templateId
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  /* ==========================================================================
+   * LEGACY-COMPATIBLE ANALYTICAL MUTATORS (Routed through active AnalyticalSession)
    * ========================================================================== */
 
   updateAnalyticalConfig: (uuid, patch) => {
     set((state) => ({
-      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
-        ...exp,
-        analyticalConfig: { ...exp.analyticalConfig, ...patch },
-      })),
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => {
+          const activeAn =
+            sess.analytes.find((a) => a.id === sess.activeAnalyteId) ??
+            sess.analytes[0];
+          return {
+            ...sess,
+            ...(patch.instrumentType ? { technique: patch.instrumentType } : {}),
+            ...(patch.instrumentModel !== undefined
+              ? { instrumentModel: patch.instrumentModel }
+              : {}),
+            ...(patch.matrixDescription !== undefined
+              ? { matrixDescription: patch.matrixDescription }
+              : {}),
+            ...(patch.analystName !== undefined
+              ? { analyst: patch.analystName }
+              : {}),
+            ...(patch.analysisDate !== undefined
+              ? { analysisDate: patch.analysisDate }
+              : {}),
+            ...(patch.notes !== undefined ? { notes: patch.notes } : {}),
+            ...(patch.dataProvenance ? { provenance: patch.dataProvenance } : {}),
+            analytes:
+              activeAn &&
+              (patch.analyteElement !== undefined ||
+                patch.wavelengthNm !== undefined ||
+                patch.calibrationUnits !== undefined)
+                ? sess.analytes.map((a) =>
+                    a.id === activeAn.id
+                      ? {
+                          ...a,
+                          ...(patch.analyteElement !== undefined
+                            ? { symbol: patch.analyteElement }
+                            : {}),
+                          ...(patch.wavelengthNm !== undefined
+                            ? { wavelengthNm: patch.wavelengthNm }
+                            : {}),
+                          ...(patch.calibrationUnits !== undefined
+                            ? { measurementUnit: patch.calibrationUnits }
+                            : {}),
+                        }
+                      : a
+                  )
+                : sess.analytes,
+          };
+        })
+      ),
     }));
     schedulePersist(get, set);
   },
 
   addCalibrationStandard: (uuid) => {
-    set((state) => ({
-      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
-        const nextNum = exp.calibrationStandards.length + 1;
-        const std: CalibrationStandard = {
-          id: generateUuid('cal'),
-          standardId: `CAL-${String(nextNum).padStart(2, '0')}`,
-          nominalConc: null,
-          unit: 'ppm',
-          instrumentResponse: null,
-          responseUnit: 'cps',
-          replicateNumber: 1,
-          provenance: 'user_entered',
-          qualityStatus: 'valid',
-          notes: '',
-        };
-        return {
-          ...exp,
-          calibrationStandards: [...exp.calibrationStandards, std],
-        };
-      }),
-    }));
-    schedulePersist(get, set);
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    const sess = exp?.analyticalSessions.find(
+      (s) => s.id === exp.activeAnalyticalSessionId
+    );
+    const calId =
+      sess?.activeCalibrationDatasetId ?? sess?.calibrationDatasets[0]?.id;
+    if (!calId) return;
+    get().addCalibrationStandardToDataset(uuid, calId);
   },
 
   updateCalibrationStandard: (uuid, stdId, patch) => {
-    set((state) => ({
-      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
-        ...exp,
-        calibrationStandards: exp.calibrationStandards.map((s) =>
-          s.id === stdId ? { ...s, ...patch } : s
-        ),
-      })),
-    }));
-    schedulePersist(get, set);
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    const sess = exp?.analyticalSessions.find(
+      (s) => s.id === exp.activeAnalyticalSessionId
+    );
+    const calId =
+      sess?.calibrationDatasets.find((c) =>
+        c.standards.some((s) => s.id === stdId)
+      )?.id ?? sess?.activeCalibrationDatasetId;
+    if (!calId) return;
+    get().updateCalibrationStandardInDataset(uuid, calId, stdId, patch);
   },
 
   deleteCalibrationStandard: (uuid, stdId) => {
-    set((state) => ({
-      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
-        ...exp,
-        calibrationStandards: exp.calibrationStandards.filter(
-          (s) => s.id !== stdId
-        ),
-      })),
-    }));
-    schedulePersist(get, set);
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    const sess = exp?.analyticalSessions.find(
+      (s) => s.id === exp.activeAnalyticalSessionId
+    );
+    const calId =
+      sess?.calibrationDatasets.find((c) =>
+        c.standards.some((s) => s.id === stdId)
+      )?.id ?? sess?.activeCalibrationDatasetId;
+    if (!calId) return;
+    get().deleteCalibrationStandardInDataset(uuid, calId, stdId);
   },
 
   addInstrumentMeasurement: (uuid, stage = 'Initial') => {
     set((state) => ({
-      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
-        const nextNum = exp.instrumentMeasurements.length + 1;
-        const tag =
-          stage === 'Initial'
-            ? 'INIT'
-            : stage === 'Final'
-              ? 'FIN'
-              : stage.toUpperCase();
-        const row: InstrumentMeasurement = {
-          id: generateUuid('im'),
-          sampleId: `ANA-${String(nextNum).padStart(2, '0')}-${tag}`,
-          linkedSurveySampleId: '',
-          stage,
-          analyte: exp.analyticalConfig.analyteElement || '',
-          replicateId: 'R1',
-          dilutionFactor: null,
-          rawSignal: null,
-          signalUnit: 'cps',
-          reportedConc: null,
-          concUnit: 'ppm',
-          provenance: 'measured_experimental',
-          qualityStatus: 'valid',
-          measurementDate:
-            exp.analyticalConfig.analysisDate || exp.experimentDate,
-          notes: '',
-        };
-        return {
-          ...exp,
-          instrumentMeasurements: [...exp.instrumentMeasurements, row],
-        };
-      }),
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        updateActiveAnalyticalSession(exp, (sess) => {
+          const activeAn =
+            sess.analytes.find((a) => a.id === sess.activeAnalyteId) ??
+            sess.analytes[0];
+          const nextNum = sess.sampleMeasurements.length + 1;
+          const tag =
+            stage === 'Initial'
+              ? 'INIT'
+              : stage === 'Final'
+                ? 'FIN'
+                : stage.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+          const row: InstrumentMeasurement = {
+            id: generateUuid('im'),
+            sampleId: `ANA-${String(nextNum).padStart(2, '0')}-${tag}`,
+            sessionId: sess.id,
+            analyteId: activeAn?.id ?? null,
+            calibrationDatasetId:
+              activeAn?.calibrationDatasetId ??
+              sess.activeCalibrationDatasetId ??
+              null,
+            linkedSurveyDatasetId: null,
+            linkedSurveyMeasurementId: null,
+            linkedSurveySampleId: '',
+            stage,
+            analyte: activeAn?.symbol || activeAn?.name || '',
+            replicateId: 'R1',
+            dilutionFactor: null,
+            reportedValueBasis: 'unspecified',
+            rawSignal: null,
+            signalUnit: sess.technique.includes('AAS') ? 'Abs' : 'cps',
+            reportedConc: null,
+            concUnit: activeAn?.measurementUnit || 'ppm',
+            provenance: 'measured_experimental',
+            qualityStatus: 'valid',
+            measurementDate: sess.analysisDate || exp.experimentDate,
+            notes: '',
+          };
+          return {
+            ...sess,
+            sampleMeasurements: [...sess.sampleMeasurements, row],
+          };
+        })
+      ),
     }));
     schedulePersist(get, set);
   },
 
   updateInstrumentMeasurement: (uuid, rowId, patch) => {
     set((state) => ({
-      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
-        ...exp,
-        instrumentMeasurements: exp.instrumentMeasurements.map((m) =>
-          m.id === rowId ? { ...m, ...patch } : m
-        ),
-      })),
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const nextSessions = exp.analyticalSessions.map((sess) => ({
+          ...sess,
+          sampleMeasurements: sess.sampleMeasurements.map((m) =>
+            m.id === rowId ? { ...m, ...patch } : m
+          ),
+        }));
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          analyticalSessions: nextSessions,
+        });
+      }),
     }));
     schedulePersist(get, set);
   },
 
   deleteInstrumentMeasurement: (uuid, rowId) => {
     set((state) => ({
-      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
-        ...exp,
-        instrumentMeasurements: exp.instrumentMeasurements.filter(
-          (m) => m.id !== rowId
-        ),
-      })),
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const nextSessions = exp.analyticalSessions.map((sess) => ({
+          ...sess,
+          sampleMeasurements: sess.sampleMeasurements.filter(
+            (m) => m.id !== rowId
+          ),
+        }));
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          analyticalSessions: nextSessions,
+        });
+      }),
     }));
     schedulePersist(get, set);
   },
@@ -1512,6 +3036,7 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
       ...obs,
       id: generateUuid('obs'),
       timestamp: now,
+      references: obs.references ?? [],
     };
     set((state) => ({
       experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
@@ -1526,6 +3051,19 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
           },
           ...exp.benchLogs,
         ],
+        activityEvents: appendActivityEvent(
+          exp,
+          {
+            module: obs.module,
+            eventType: 'observation_logged',
+            sourceKind: 'observation',
+            sourceId: record.id,
+            sourceLabel: obs.category,
+            author: obs.author || exp.researcher || 'Research Scientist',
+            description: `[${obs.category}] ${obs.text.slice(0, 140)}`,
+          },
+          now
+        ),
       })),
     }));
     schedulePersist(get, set);
@@ -1738,6 +3276,747 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
     schedulePersist(get, set);
   },
 
+  transitionExperimentStatus: (uuid, newStatus, explanation = '', options) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        if (exp.status === newStatus && !explanation.trim()) return exp;
+        let nextSnapshots = exp.snapshots ?? [];
+        let relatedSnapshotId: string | null = null;
+        if (options?.createSnapshot) {
+          const snap = createExperimentSnapshotRecord(exp, {
+            snapshotId: generateUuid('snap'),
+            name:
+              options.snapshotName?.trim() ||
+              `Status Transition Snapshot (${newStatus})`,
+            description:
+              explanation.trim() ||
+              `Captured automatically when transitioning ${exp.experimentId} from ${exp.status} to ${newStatus}.`,
+            researcher: exp.researcher || 'Research Scientist',
+            capturedAt: now,
+          });
+          nextSnapshots = [...nextSnapshots, snap];
+          relatedSnapshotId = snap.snapshotId;
+        }
+        const lcEvent: ExperimentLifecycleEvent = {
+          id: generateUuid('lc'),
+          fromStatus: exp.status,
+          toStatus: newStatus,
+          timestamp: now,
+          researcher: exp.researcher || 'Research Scientist',
+          explanation: explanation.trim(),
+          snapshotId: relatedSnapshotId,
+        };
+        const nextExp: Experiment = {
+          ...exp,
+          status: newStatus,
+          snapshots: nextSnapshots,
+          lifecycleHistory: [...(exp.lifecycleHistory ?? []), lcEvent],
+          benchLogs: [
+            {
+              id: generateUuid('log'),
+              timestamp: now,
+              eventType: 'status',
+              message: `Status changed: ${exp.status} → ${newStatus}${explanation.trim() ? ` (${explanation.trim()})` : ''}.`,
+            },
+            ...exp.benchLogs,
+          ],
+          activityEvents: appendActivityEvent(
+            exp,
+            {
+              module: 'overview',
+              eventType:
+                newStatus === 'Archived'
+                  ? 'experiment_archived'
+                  : 'lifecycle_transition',
+              sourceKind: relatedSnapshotId ? 'snapshot' : 'experiment',
+              sourceId: relatedSnapshotId ?? exp.uuid,
+              sourceLabel: newStatus,
+              author: exp.researcher || 'Research Scientist',
+              description: `Lifecycle status changed from ${exp.status} to ${newStatus}${explanation.trim() ? ` — ${explanation.trim()}` : ''}.`,
+            },
+            now
+          ),
+        };
+        return nextExp;
+      }),
+      statusBanner: {
+        type: 'info',
+        message: `Experiment status transitioned to ${newStatus}.`,
+      },
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateResearchPlan: (uuid, patch) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
+        ...exp,
+        researchPlan: {
+          ...(exp.researchPlan ?? createDefaultResearchPlan()),
+          ...patch,
+        },
+      })),
+    }));
+    schedulePersist(get, set);
+  },
+
+  addPlanDeviation: (uuid, deviation) => {
+    const now = new Date().toISOString();
+    const id = generateUuid('dev');
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const plan = exp.researchPlan ?? createDefaultResearchPlan();
+        return {
+          ...exp,
+          researchPlan: {
+            ...plan,
+            deviations: [
+              {
+                id,
+                timestamp: now,
+                author:
+                  deviation.author?.trim() ||
+                  exp.researcher ||
+                  'Research Scientist',
+                description: deviation.description.trim(),
+                reason: deviation.reason.trim(),
+              },
+              ...(plan.deviations ?? []),
+            ],
+          },
+          activityEvents: appendActivityEvent(
+            exp,
+            {
+              module: 'batch-synthesis',
+              eventType: 'metadata_edited',
+              sourceKind: 'experiment',
+              sourceId: exp.uuid,
+              sourceLabel: 'Research Deviation',
+              author:
+                deviation.author?.trim() ||
+                exp.researcher ||
+                'Research Scientist',
+              description: `Logged plan deviation: ${deviation.description.trim()}.`,
+            },
+            now
+          ),
+        };
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deletePlanDeviation: (uuid, deviationId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const plan = exp.researchPlan ?? createDefaultResearchPlan();
+        return {
+          ...exp,
+          researchPlan: {
+            ...plan,
+            deviations: (plan.deviations ?? []).filter(
+              (d) => d.id !== deviationId
+            ),
+          },
+        };
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  saveExperimentTemplate: (template) => {
+    const now = new Date().toISOString();
+    const record: ExperimentTemplate = {
+      ...template,
+      id: generateUuid('tmpl-exp'),
+      createdAt: now,
+    };
+    set((state) => ({
+      experimentTemplates: [record, ...(state.experimentTemplates ?? [])],
+      statusBanner: {
+        type: 'success',
+        message: `Saved documentation template "${record.name}".`,
+      },
+    }));
+    schedulePersist(get, set);
+    return record;
+  },
+
+  deleteExperimentTemplate: (templateId) => {
+    set((state) => ({
+      experimentTemplates: (state.experimentTemplates ?? []).filter(
+        (t) => t.id !== templateId
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  applyExperimentTemplate: (uuid, templateId) => {
+    const tmpl = (get().experimentTemplates ?? []).find(
+      (t) => t.id === templateId
+    );
+    if (!tmpl) return;
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const plan = exp.researchPlan ?? createDefaultResearchPlan();
+        const existingTitles = new Set(
+          (exp.milestones ?? []).map((m) => m.title.trim().toLowerCase())
+        );
+        const addedMilestones: ResearchMilestone[] = tmpl.defaultMilestones
+          .filter(
+            (ms) => !existingTitles.has(ms.title.trim().toLowerCase())
+          )
+          .map((ms, idx) => ({
+            id: generateUuid('ms'),
+            order: (exp.milestones?.length ?? 0) + idx,
+            title: ms.title,
+            description: ms.description || `Added from template "${tmpl.name}".`,
+            status: 'pending',
+            plannedDateTime: ms.plannedDateTime || '',
+            actualCompletedAt: null,
+            linkedModule: null,
+            linkedRecordId: null,
+            linkedRecordLabel: '',
+            deviations: '',
+            notes: '',
+          }));
+        const nextExp: Experiment = projectExperimentCompatibilityMirrors({
+          ...exp,
+          objective: exp.objective.trim() || tmpl.defaultObjective,
+          researchPlan: {
+            ...plan,
+            researchQuestions:
+              plan.researchQuestions.length > 0
+                ? plan.researchQuestions
+                : [...tmpl.researchQuestions],
+            plannedMeasurementRequirements:
+              plan.plannedMeasurementRequirements.trim() ||
+              tmpl.plannedMeasurementRequirements,
+            plannedAnalyticalSessions:
+              plan.plannedAnalyticalSessions.trim() ||
+              tmpl.plannedAnalyticalSessions,
+            expectedDeliverables:
+              plan.expectedDeliverables.trim() || tmpl.expectedDeliverables,
+            externalProtocolRefs:
+              plan.externalProtocolRefs.length > 0
+                ? plan.externalProtocolRefs
+                : [...tmpl.externalProtocolRefs],
+          },
+          milestones: [...(exp.milestones ?? []), ...addedMilestones],
+          activityEvents: appendActivityEvent(
+            exp,
+            {
+              module: 'batch-synthesis',
+              eventType: 'metadata_edited',
+              sourceKind: 'experiment',
+              sourceId: exp.uuid,
+              sourceLabel: tmpl.name,
+              author: exp.researcher || 'Research Scientist',
+              description: `Applied documentation template "${tmpl.name}" (${addedMilestones.length} milestones appended).`,
+            },
+            now
+          ),
+        });
+        return nextExp;
+      }),
+      statusBanner: {
+        type: 'success',
+        message: `Applied documentation template "${tmpl.name}".`,
+      },
+    }));
+    schedulePersist(get, set);
+  },
+
+  addMilestone: (uuid, input) => {
+    const trimmed = input.title.trim();
+    if (!trimmed) return;
+    const now = new Date().toISOString();
+    const id = generateUuid('ms');
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const current = exp.milestones ?? [];
+        const next: ResearchMilestone = {
+          id,
+          order: current.length,
+          title: trimmed,
+          description: input.description?.trim() ?? '',
+          status: 'pending',
+          plannedDateTime: input.plannedDateTime?.trim() ?? '',
+          actualCompletedAt: null,
+          linkedModule: input.linkedModule ?? null,
+          linkedRecordId: input.linkedRecordId ?? null,
+          linkedRecordLabel: input.linkedRecordLabel?.trim() ?? '',
+          deviations: '',
+          notes: '',
+        };
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          milestones: [...current, next],
+          benchLogs: [
+            {
+              id: generateUuid('log'),
+              timestamp: now,
+              eventType: 'checklist',
+              message: `Added milestone: ${trimmed}`,
+            },
+            ...exp.benchLogs,
+          ],
+          activityEvents: appendActivityEvent(
+            exp,
+            {
+              module: 'bench-runner',
+              eventType: 'milestone_updated',
+              sourceKind: 'milestone',
+              sourceId: id,
+              sourceLabel: trimmed,
+              author: exp.researcher || 'Research Scientist',
+              description: `Added workflow milestone "${trimmed}".`,
+            },
+            now
+          ),
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateMilestone: (uuid, milestoneId, patch) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) =>
+        projectExperimentCompatibilityMirrors({
+          ...exp,
+          milestones: (exp.milestones ?? []).map((m) =>
+            m.id === milestoneId ? { ...m, ...patch } : m
+          ),
+        })
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  reorderMilestone: (uuid, milestoneId, direction) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const list = [...(exp.milestones ?? [])].sort(
+          (a, b) => a.order - b.order
+        );
+        const idx = list.findIndex((m) => m.id === milestoneId);
+        if (idx === -1) return exp;
+        const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+        if (swapIdx < 0 || swapIdx >= list.length) return exp;
+        const tmp = list[idx];
+        list[idx] = list[swapIdx];
+        list[swapIdx] = tmp;
+        const reordered = list.map((m, i) => ({ ...m, order: i }));
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          milestones: reordered,
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  duplicateMilestone: (uuid, milestoneId) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const list = [...(exp.milestones ?? [])].sort(
+          (a, b) => a.order - b.order
+        );
+        const source = list.find((m) => m.id === milestoneId);
+        if (!source) return exp;
+        const copy: ResearchMilestone = {
+          ...structuredClone(source),
+          id: generateUuid('ms'),
+          title: `${source.title} (Copy)`,
+          status: 'pending',
+          actualCompletedAt: null,
+          order: list.length,
+        };
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          milestones: [...list, copy],
+          benchLogs: [
+            {
+              id: generateUuid('log'),
+              timestamp: now,
+              eventType: 'checklist',
+              message: `Duplicated milestone: ${source.title}`,
+            },
+            ...exp.benchLogs,
+          ],
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  setMilestoneStatus: (uuid, milestoneId, status) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const target = (exp.milestones ?? []).find((m) => m.id === milestoneId);
+        if (!target) return exp;
+        const nextMilestones = (exp.milestones ?? []).map((m) =>
+          m.id === milestoneId
+            ? {
+                ...m,
+                status,
+                actualCompletedAt: status === 'completed' ? now : null,
+              }
+            : m
+        );
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          milestones: nextMilestones,
+          benchLogs: [
+            {
+              id: generateUuid('log'),
+              timestamp: now,
+              eventType: 'checklist',
+              message: `Milestone "${target.title}" set to ${status}.`,
+            },
+            ...exp.benchLogs,
+          ],
+          activityEvents: appendActivityEvent(
+            exp,
+            {
+              module: 'bench-runner',
+              eventType: 'milestone_updated',
+              sourceKind: 'milestone',
+              sourceId: target.id,
+              sourceLabel: target.title,
+              author: exp.researcher || 'Research Scientist',
+              description: `Milestone "${target.title}" marked as ${status}.`,
+            },
+            now
+          ),
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteMilestone: (uuid, milestoneId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const remaining = (exp.milestones ?? [])
+          .filter((m) => m.id !== milestoneId)
+          .map((m, i) => ({ ...m, order: i }));
+        return projectExperimentCompatibilityMirrors({
+          ...exp,
+          milestones: remaining,
+        });
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  addResearchTimer: (uuid, input) => {
+    const name = input.name.trim();
+    if (!name) return;
+    const now = new Date().toISOString();
+    const durSec = Math.max(10, Math.round(input.configuredDurationSec ?? 1800));
+    const timer: ResearchTimer = {
+      id: generateUuid('tmr'),
+      name,
+      mode: input.mode,
+      configuredDurationSec: durSec,
+      activeDurationSec: durSec,
+      elapsedMs: 0,
+      remainingMs: input.mode === 'countdown' ? durSec * 1000 : 0,
+      status: 'ready',
+      lastTickAt: null,
+      startedAt: null,
+      completedAt: null,
+      linkedMilestoneId: input.linkedMilestoneId ?? null,
+      history: [
+        {
+          timestamp: now,
+          action: 'created',
+          detail: `Created ${input.mode} timer "${name}".`,
+        },
+      ],
+    };
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
+        ...exp,
+        timers: [...(exp.timers ?? []), timer],
+        benchLogs: [
+          {
+            id: generateUuid('log'),
+            timestamp: now,
+            eventType: 'timer',
+            message: `Created ${input.mode} timer "${name}".`,
+          },
+          ...exp.benchLogs,
+        ],
+      })),
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateResearchTimer: (uuid, timerId, patch, historyNote) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const nextTimers = (exp.timers ?? []).map((t) => {
+          if (t.id !== timerId) return t;
+          const merged = { ...t, ...patch };
+          if (historyNote) {
+            merged.history = [
+              {
+                timestamp: now,
+                action: historyNote.action,
+                detail: historyNote.detail,
+              },
+              ...(t.history ?? []),
+            ].slice(0, 60);
+          }
+          return merged;
+        });
+        return {
+          ...exp,
+          timers: nextTimers,
+          benchLogs: historyNote
+            ? [
+                {
+                  id: generateUuid('log'),
+                  timestamp: now,
+                  eventType: 'timer',
+                  message: historyNote.detail,
+                },
+                ...exp.benchLogs,
+              ]
+            : exp.benchLogs,
+          activityEvents:
+            historyNote &&
+            (historyNote.action === 'started' ||
+              historyNote.action === 'completed')
+              ? appendActivityEvent(
+                  exp,
+                  {
+                    module: 'bench-runner',
+                    eventType: 'timer_event',
+                    sourceKind: 'timer',
+                    sourceId: timerId,
+                    sourceLabel:
+                      nextTimers.find((t) => t.id === timerId)?.name ?? 'Timer',
+                    author: exp.researcher || 'Research Scientist',
+                    description: historyNote.detail,
+                  },
+                  now
+                )
+              : exp.activityEvents,
+        };
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteResearchTimer: (uuid, timerId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
+        ...exp,
+        timers: (exp.timers ?? []).filter((t) => t.id !== timerId),
+      })),
+    }));
+    schedulePersist(get, set);
+  },
+
+  updateSampleRegistryNote: (uuid, note) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const existing = exp.sampleRegistryNotes ?? [];
+        const has = existing.some((n) => n.sampleKey === note.sampleKey);
+        const nextNotes = has
+          ? existing.map((n) =>
+              n.sampleKey === note.sampleKey ? { ...n, ...note } : n
+            )
+          : [...existing, note];
+        return {
+          ...exp,
+          sampleRegistryNotes: nextNotes,
+        };
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  createExperimentSnapshot: (uuid, input) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    if (!exp) return null;
+    const now = new Date().toISOString();
+    const snap = createExperimentSnapshotRecord(exp, {
+      snapshotId: generateUuid('snap'),
+      name:
+        input.name.trim() ||
+        `Snapshot ${(exp.snapshots?.length ?? 0) + 1} (${now.slice(0, 10)})`,
+      description: input.description?.trim() ?? '',
+      researcher:
+        input.researcher?.trim() || exp.researcher || 'Research Scientist',
+      capturedAt: now,
+    });
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) => ({
+        ...e,
+        snapshots: [...(e.snapshots ?? []), snap],
+        activityEvents: appendActivityEvent(
+          e,
+          {
+            module: 'overview',
+            eventType: 'snapshot_created',
+            sourceKind: 'snapshot',
+            sourceId: snap.snapshotId,
+            sourceLabel: snap.name,
+            author: snap.researcher,
+            description: `Created immutable snapshot "${snap.name}".`,
+          },
+          now
+        ),
+      })),
+      statusBanner: {
+        type: 'success',
+        message: `Created immutable snapshot "${snap.name}".`,
+      },
+    }));
+    schedulePersist(get, set);
+    return snap;
+  },
+
+  deleteExperimentSnapshot: (uuid, snapshotId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => {
+        const isBound = (exp.finalizedReports ?? []).some(
+          (r) => r.snapshotId === snapshotId
+        );
+        if (isBound) return exp;
+        return {
+          ...exp,
+          snapshots: (exp.snapshots ?? []).filter(
+            (s) => s.snapshotId !== snapshotId
+          ),
+        };
+      }),
+    }));
+    schedulePersist(get, set);
+  },
+
+  restoreExperimentSnapshot: (sourceUuid, snapshotId) => {
+    const state = get();
+    const sourceExp = state.experiments.find((e) => e.uuid === sourceUuid);
+    const snap = sourceExp?.snapshots?.find((s) => s.snapshotId === snapshotId);
+    if (!sourceExp || !snap) return null;
+
+    const restored = restoreSnapshotAsIndependentExperiment(
+      snap,
+      state.experiments,
+      generateUuid,
+      generateUniqueExperimentId
+    );
+
+    set((prev) => ({
+      experiments: [restored, ...prev.experiments],
+      activeExperimentUuid: restored.uuid,
+      activeModule: 'overview',
+      statusBanner: {
+        type: 'success',
+        message: `Restored snapshot "${snap.name}" as new independent experiment ${restored.experimentId}.`,
+      },
+    }));
+    schedulePersist(get, set);
+    return restored;
+  },
+
+  createFinalizedReport: (uuid, input) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    if (!exp) return null;
+    const now = new Date().toISOString();
+    const nextVersion =
+      (exp.finalizedReports ?? []).reduce(
+        (max, r) => Math.max(max, r.versionNumber),
+        0
+      ) + 1;
+
+    let boundSnapshot: ExperimentSnapshot | undefined = input.snapshotId
+      ? (exp.snapshots ?? []).find((s) => s.snapshotId === input.snapshotId)
+      : undefined;
+    let createdNewSnapshot: ExperimentSnapshot | null = null;
+
+    if (!boundSnapshot) {
+      createdNewSnapshot = createExperimentSnapshotRecord(exp, {
+        snapshotId: generateUuid('snap'),
+        name:
+          input.snapshotName?.trim() ||
+          `Finalized Report v${nextVersion} Snapshot`,
+        description: `Immutable snapshot automatically created to lock Finalized Report v${nextVersion}.`,
+        researcher: exp.researcher || 'Research Scientist',
+        capturedAt: now,
+      });
+      boundSnapshot = createdNewSnapshot;
+    }
+
+    const report: FinalizedReport = {
+      id: generateUuid('frep'),
+      versionNumber: nextVersion,
+      title:
+        input.title.trim() ||
+        `${exp.experimentId} — Research Report (Finalized v${nextVersion})`,
+      reportType: exp.reportConfig.reportType ?? 'complete-research',
+      snapshotId: boundSnapshot.snapshotId,
+      snapshotName: boundSnapshot.name,
+      finalizedAt: now,
+      researcher: exp.researcher || 'Research Scientist',
+      scientificReviewStatus: boundSnapshot.scientificReviewStatus,
+      reportConfig: structuredClone(exp.reportConfig),
+      notes: input.notes?.trim() ?? '',
+    };
+
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) => ({
+        ...e,
+        snapshots: createdNewSnapshot
+          ? [...(e.snapshots ?? []), createdNewSnapshot]
+          : e.snapshots ?? [],
+        finalizedReports: [report, ...(e.finalizedReports ?? [])],
+        activityEvents: appendActivityEvent(
+          e,
+          {
+            module: 'lab-report',
+            eventType: 'report_finalized',
+            sourceKind: 'finalized_report',
+            sourceId: report.id,
+            sourceLabel: `Report v${nextVersion}`,
+            author: report.researcher,
+            description: `Finalized Report v${nextVersion} ("${report.title}") bound to snapshot "${boundSnapshot!.name}".`,
+          },
+          now
+        ),
+      })),
+      statusBanner: {
+        type: 'success',
+        message: `Finalized Report v${nextVersion} bound to immutable snapshot "${boundSnapshot.name}".`,
+      },
+    }));
+    schedulePersist(get, set);
+    return report;
+  },
+
+  deleteFinalizedReport: (uuid, reportId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (exp) => ({
+        ...exp,
+        finalizedReports: (exp.finalizedReports ?? []).filter(
+          (r) => r.id !== reportId
+        ),
+      })),
+    }));
+    schedulePersist(get, set);
+  },
+
   replaceWorkspace: (workspace) => {
     const validActive = workspace.experiments.some(
       (e) => e.uuid === workspace.activeExperimentUuid
@@ -1750,6 +4029,10 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
       schemaVersion: WORKSPACE_SCHEMA_VERSION,
       appVersion: APP_VERSION,
       activeExperimentUuid: validActive,
+      experimentTemplates:
+        workspace.experimentTemplates && workspace.experimentTemplates.length > 0
+          ? workspace.experimentTemplates
+          : createDefaultExperimentTemplates(),
       hasInitializedDemo: true,
     };
     const saved = saveWorkspaceToStorage(normalized);
@@ -1759,6 +4042,7 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
       lastSavedAt: saved.savedAt ?? normalized.lastSavedAt,
       storageBytes: saved.byteSize,
       storageError: saved.error,
+      storageDiagnostics: computeStorageDiagnostics(normalized),
       statusBanner: {
         type: 'success',
         message: `Imported workspace (${normalized.experiments.length} experiments, ${normalized.precursors.length} precursors, ${normalized.supports.length} supports).`,

@@ -1,10 +1,11 @@
-export const APP_VERSION = '0.3.0';
-export const WORKSPACE_SCHEMA_VERSION = '3.0.0';
-export const EXPERIMENT_DATA_VERSION = '3.0.0';
-export const CALC_ENGINE_VERSION = '0.3.0-phase3-survey-analysis';
+export const APP_VERSION = '0.5.0';
+export const WORKSPACE_SCHEMA_VERSION = '5.0.0';
+export const EXPERIMENT_DATA_VERSION = '5.0.0';
+export const CALC_ENGINE_VERSION = '0.5.0-phase5-integrated-workflow';
 
 export type ActiveModule =
   | 'library'
+  | 'overview'
   | 'batch-synthesis'
   | 'uptake-survey'
   | 'analytical'
@@ -21,6 +22,9 @@ export type ExperimentStatus =
   | 'Draft'
   | 'Planned'
   | 'In Progress'
+  | 'Measurements Pending'
+  | 'Analysis in Progress'
+  | 'Under Review'
   | 'Completed'
   | 'Archived';
 
@@ -302,6 +306,20 @@ export type LineStyle = 'solid' | 'dashed' | 'dotted';
 export type LegendPosition = 'top' | 'bottom' | 'none';
 export type TickDensity = 'compact' | 'standard' | 'dense';
 
+export interface AnalysisProvenanceMetadata {
+  sourceExperimentUuid: string;
+  sourceCollectionId: string;
+  sourceCollectionLabel: string;
+  includedMeasurementIds: string[];
+  sourceContentHash: string;
+  exclusionSettingsSummary: string;
+  unitSummary: string;
+  calcEngineVersion: string;
+  capturedAt: string;
+  provenance: DataProvenance;
+  scientificReviewStatus: ScientificReviewStatus;
+}
+
 export interface FigureConfiguration {
   id: string;
   name: string;
@@ -333,6 +351,7 @@ export interface FigureConfiguration {
   exportHeightPx: number;
   exportScale: 1 | 2 | 3;
   savedAt: string;
+  analysisProvenance?: AnalysisProvenanceMetadata | null;
 }
 
 export interface DatasetComparisonRef {
@@ -399,7 +418,29 @@ export interface SurveyDataset {
   updatedAt: string;
 }
 
-export type InstrumentType = 'ICP-OES' | 'AAS' | 'ICP-MS' | 'UV-Vis' | 'Other';
+export type InstrumentType =
+  | 'ICP-OES'
+  | 'Flame AAS'
+  | 'Graphite Furnace AAS'
+  | 'AAS'
+  | 'ICP-MS'
+  | 'UV-Vis'
+  | 'Other';
+
+export type AnalyticalWorkspaceTab =
+  | 'overview'
+  | 'calibration'
+  | 'samples'
+  | 'dilutions'
+  | 'quality'
+  | 'figures';
+
+export type AnalyticalSessionStatus = 'Active' | 'Archived';
+
+export type ReportedValueBasis =
+  | 'as_measured_diluted'
+  | 'already_dilution_corrected'
+  | 'unspecified';
 
 export interface AnalyticalConfiguration {
   instrumentType: InstrumentType;
@@ -414,9 +455,23 @@ export interface AnalyticalConfiguration {
   dataProvenance: DataProvenance;
 }
 
+export interface AnalyticalAnalyte {
+  id: string;
+  name: string;
+  symbol: string;
+  wavelengthNm: number | null;
+  measurementUnit: string;
+  methodReference: string;
+  calibrationDatasetId: string | null;
+  notes: string;
+}
+
 export interface CalibrationStandard {
   id: string;
   standardId: string;
+  analyteId?: string | null;
+  isBlank?: boolean;
+  replicateGroupId?: string;
   nominalConc: number | null;
   unit: string;
   instrumentResponse: number | null;
@@ -424,38 +479,310 @@ export interface CalibrationStandard {
   replicateNumber: number;
   provenance: DataProvenance;
   qualityStatus: MeasurementQualityStatus;
+  exclusionReason?: string;
   notes: string;
 }
 
-export type SampleStage = 'Initial' | 'Final' | 'Blank' | 'Control';
+export interface CalibrationDataset {
+  id: string;
+  calibrationId: string;
+  title: string;
+  sessionId: string;
+  analyteId: string | null;
+  referenceMethod: string;
+  concUnit: string;
+  responseUnit: string;
+  analyst: string;
+  analysisDate: string;
+  provenance: DataProvenance;
+  standards: CalibrationStandard[];
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SampleStage =
+  | 'Initial'
+  | 'Final'
+  | 'Blank'
+  | 'Control'
+  | 'Reference Material'
+  | 'Replicate'
+  | 'User-Defined';
+
+export type MeasurementValueQualifier =
+  | 'valid_numeric'
+  | 'valid_zero'
+  | 'missing'
+  | 'not_measured'
+  | 'not_detected'
+  | 'below_lod'
+  | 'below_loq'
+  | 'instrument_invalid'
+  | 'excluded_by_user';
+
+export type SuppliedLimitType = 'LOD' | 'LOQ' | 'MDL' | 'Other';
 
 export interface InstrumentMeasurement {
   /** Stable internal identifier independent of editable display label */
   id: string;
   sampleId: string;
+  sessionId?: string;
+  analyteId?: string | null;
+  calibrationDatasetId?: string | null;
+  linkedSurveyDatasetId?: string | null;
+  linkedSurveyMeasurementId?: string | null;
   linkedSurveySampleId: string;
   analyte: string;
   stage: SampleStage;
+  classificationLabel?: string;
   replicateId: string;
   dilutionFactor: number | null;
+  reportedValueBasis?: ReportedValueBasis;
   rawSignal: number | null;
   signalUnit: string;
   reportedConc: number | null;
   concUnit: string;
+  /** Phase 5 explicit analytical measurement qualifier preserved independently of numeric value */
+  valueQualifier?: MeasurementValueQualifier;
+  /** Original raw token from import or entry (e.g., "<LOD", "<0.02", "ND", "BDL", "0") */
+  originalValueToken?: string | null;
+  /** Optional externally supplied detection/quantification limit value (never automatically inferred) */
+  suppliedLimitValue?: number | null;
+  suppliedLimitType?: SuppliedLimitType | null;
+  suppliedLimitUnit?: string | null;
+  instrumentFlag?: string;
+  exclusionReason?: string;
+  importRecordId?: string | null;
+  importRowNumber?: number | null;
+  originalReportedConc?: string | null;
+  originalConcUnit?: string | null;
+  analysisTimestamp?: string;
   provenance: DataProvenance;
   qualityStatus: MeasurementQualityStatus;
   measurementDate: string;
   notes: string;
 }
 
+export interface DilutionRecord {
+  id: string;
+  sampleMeasurementId: string | null;
+  sampleId: string;
+  stage: 'Initial' | 'Final' | 'Other';
+  dilutionFactor: number | null;
+  sourceVolumeMl: number | null;
+  finalVolumeMl: number | null;
+  concUnit: string;
+  reportedValueBasis: ReportedValueBasis;
+  preparationReference: string;
+  matrixDescription: string;
+  analyst: string;
+  date: string;
+  verificationStatus: VerificationStatus;
+  provenance: DataProvenance;
+  notes: string;
+}
+
+export type InstrumentImportColumnKey =
+  | 'sampleId'
+  | 'analyte'
+  | 'stage'
+  | 'replicateId'
+  | 'reportedConc'
+  | 'concUnit'
+  | 'rawSignal'
+  | 'signalUnit'
+  | 'dilutionFactor'
+  | 'analysisTimestamp'
+  | 'instrumentFlag'
+  | 'notes';
+
+export interface InstrumentImportRecord {
+  id: string;
+  filename: string;
+  importedAt: string;
+  format: 'csv' | 'tsv' | 'clipboard';
+  targetSessionId: string;
+  sourceHeaders: string[];
+  columnMapping: Partial<Record<InstrumentImportColumnKey, string>>;
+  totalRows: number;
+  acceptedCount: number;
+  incompleteCount: number;
+  rejectedCount: number;
+  duplicateCount: number;
+  unresolvedLinkCount: number;
+}
+
+export interface ImportMappingTemplate {
+  id: string;
+  name: string;
+  technique: InstrumentType;
+  mappings: Partial<Record<InstrumentImportColumnKey, string>>;
+  createdAt: string;
+}
+
+export type AnalyticalQualityIssueCategory =
+  | 'missing_measurement'
+  | 'incomplete_metadata'
+  | 'unresolved_survey_association'
+  | 'incompatible_units'
+  | 'duplicate_measurement'
+  | 'conflicting_dilution_metadata'
+  | 'missing_calibration_association'
+  | 'instrument_warning'
+  | 'flagged_observation'
+  | 'user_excluded_record'
+  | 'pending_review';
+
+export type AnalyticalReviewStatus =
+  | 'Open'
+  | 'Under Review'
+  | 'Resolved'
+  | 'Acknowledged'
+  | 'Excluded by Researcher';
+
+export interface AnalyticalReviewHistoryEntry {
+  timestamp: string;
+  status: AnalyticalReviewStatus;
+  author: string;
+  note: string;
+}
+
+export interface AnalyticalReviewRecord {
+  id: string;
+  issueKey: string;
+  category: AnalyticalQualityIssueCategory;
+  sessionId: string;
+  recordId: string;
+  recordLabel: string;
+  description: string;
+  provenance: DataProvenance;
+  identifiedAt: string;
+  status: AnalyticalReviewStatus;
+  researcherNotes: string;
+  history: AnalyticalReviewHistoryEntry[];
+}
+
+export type AnalyticalFigurePlotType =
+  | 'calibration_scatter'
+  | 'calibration_regression'
+  | 'residuals_vs_conc'
+  | 'residuals_vs_fitted'
+  | 'replicate_response'
+  | 'measurement_distribution'
+  | 'concentration_comparison'
+  | 'multi_session_comparison';
+
+export interface AnalyticalFigureConfiguration {
+  id: string;
+  name: string;
+  plotType: AnalyticalFigurePlotType;
+  title: string;
+  xAxisTitle: string;
+  xAxisUnit: string;
+  yAxisTitle: string;
+  yAxisUnit: string;
+  xMin: number | null;
+  xMax: number | null;
+  yMin: number | null;
+  yMax: number | null;
+  tickDensity: TickDensity;
+  numericPrecision: number;
+  markerShape: MarkerShape;
+  markerSize: number;
+  showLines: boolean;
+  lineStyle: LineStyle;
+  primaryColor: string;
+  grayscaleMode: boolean;
+  legendPosition: LegendPosition;
+  showGridlines: boolean;
+  exportWidthPx: number;
+  exportHeightPx: number;
+  exportScale: 1 | 2 | 3;
+  savedAt: string;
+  analysisProvenance?: AnalysisProvenanceMetadata | null;
+}
+
+export interface AnalyticalSession {
+  id: string;
+  sessionId: string;
+  title: string;
+  experimentUuid: string;
+  status: AnalyticalSessionStatus;
+  technique: InstrumentType;
+  customTechniqueName: string;
+  instrumentManufacturer: string;
+  instrumentModel: string;
+  instrumentIdentifier: string;
+  methodReference: string;
+  analyst: string;
+  analysisDate: string;
+  matrixDescription: string;
+  conditionsNote: string;
+  analytes: AnalyticalAnalyte[];
+  activeAnalyteId: string | null;
+  calibrationDatasets: CalibrationDataset[];
+  activeCalibrationDatasetId: string | null;
+  sampleMeasurements: InstrumentMeasurement[];
+  dilutionRecords: DilutionRecord[];
+  importHistory: InstrumentImportRecord[];
+  reviewRecords: AnalyticalReviewRecord[];
+  figureConfig: AnalyticalFigureConfiguration;
+  savedFigures: AnalyticalFigureConfiguration[];
+  observations: string;
+  provenance: DataProvenance;
+  scientificReviewStatus: ScientificReviewStatus;
+  isDemonstration: boolean;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnalyticalComparisonConfig {
+  selectedSessionIds: string[];
+  compareAnalyteSymbol: string;
+  plotMode: 'concentration_comparison' | 'calibration_comparison';
+}
+
+export type ObservationCategory =
+  | 'General'
+  | 'Synthesis'
+  | 'Survey'
+  | 'Analytical'
+  | 'Bench'
+  | 'General observation'
+  | 'Measurement record'
+  | 'Research deviation'
+  | 'Equipment note'
+  | 'Analytical observation'
+  | 'Data-quality concern'
+  | 'Follow-up question'
+  | 'Research interpretation';
+
+export type ObservationReferenceKind =
+  | 'experiment'
+  | 'survey_dataset'
+  | 'analytical_session'
+  | 'sample_measurement'
+  | 'material_snapshot'
+  | 'milestone'
+  | 'figure';
+
+export interface ObservationReference {
+  kind: ObservationReferenceKind;
+  id: string;
+  label: string;
+}
+
 export interface ExperimentalObservation {
   id: string;
   timestamp: string;
   module: ActiveModule;
-  category: 'General' | 'Synthesis' | 'Survey' | 'Analytical' | 'Bench';
+  category: ObservationCategory;
   author: string;
   text: string;
   provenance: DataProvenance;
+  references?: ObservationReference[];
 }
 
 export interface BenchChecklistItem {
@@ -465,6 +792,23 @@ export interface BenchChecklistItem {
   plannedTime: string;
   actualCompletedAt: string | null;
   notes: string;
+}
+
+export type MilestoneStatus = 'pending' | 'completed' | 'archived';
+
+export interface ResearchMilestone {
+  id: string;
+  title: string;
+  description: string;
+  plannedDateTime: string;
+  actualCompletedAt: string | null;
+  status: MilestoneStatus;
+  linkedModule: ActiveModule | null;
+  linkedRecordId: string | null;
+  linkedRecordLabel: string;
+  notes: string;
+  deviations: string;
+  order: number;
 }
 
 export type ElapsedTimerStatus = 'ready' | 'running' | 'paused';
@@ -485,6 +829,30 @@ export interface BenchTimerState {
   completedAt: string | null;
 }
 
+export interface ResearchTimerHistoryEntry {
+  timestamp: string;
+  action: 'created' | 'started' | 'paused' | 'resumed' | 'reset' | 'completed' | 'configured';
+  detail: string;
+}
+
+export interface ResearchTimer {
+  id: string;
+  name: string;
+  mode: 'elapsed' | 'countdown';
+  /** User-configured duration in seconds (for countdown mode) */
+  configuredDurationSec: number;
+  /** Active session duration in seconds applied to the current countdown */
+  activeDurationSec: number;
+  elapsedMs: number;
+  remainingMs: number;
+  status: CountdownTimerStatus;
+  lastTickAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  linkedMilestoneId: string | null;
+  history: ResearchTimerHistoryEntry[];
+}
+
 export interface BenchLog {
   id: string;
   timestamp: string;
@@ -492,12 +860,147 @@ export interface BenchLog {
   message: string;
 }
 
+export interface ExperimentLifecycleEvent {
+  id: string;
+  fromStatus: ExperimentStatus | null;
+  toStatus: ExperimentStatus;
+  timestamp: string;
+  researcher: string;
+  explanation: string;
+  snapshotId?: string | null;
+}
+
+export interface ResearchPlanDeviation {
+  id: string;
+  timestamp: string;
+  description: string;
+  reason: string;
+  author: string;
+}
+
+export interface ResearchPlanMetadata {
+  researchQuestions: string[];
+  plannedSampleIds: string[];
+  plannedMeasurementRequirements: string;
+  plannedAnalyticalSessions: string;
+  expectedDeliverables: string;
+  externalProtocolRefs: string[];
+  deviations: ResearchPlanDeviation[];
+}
+
+export interface ExperimentTemplate {
+  id: string;
+  name: string;
+  description: string;
+  experimentType: ExperimentType;
+  defaultObjective: string;
+  researchQuestions: string[];
+  sampleNamingConvention: string;
+  plannedMeasurementRequirements: string;
+  plannedAnalyticalSessions: string;
+  expectedDeliverables: string;
+  externalProtocolRefs: string[];
+  defaultMilestones: Array<{
+    title: string;
+    description: string;
+    plannedDateTime: string;
+  }>;
+  preferredReportType: ReportType;
+  createdAt: string;
+}
+
+export type SampleDocumentationStatus =
+  | 'Planned'
+  | 'Recorded'
+  | 'Analytically Linked'
+  | 'Flagged / Review Needed'
+  | 'Excluded';
+
+export interface SampleRegistryNote {
+  sampleKey: string;
+  classification: string;
+  notes: string;
+}
+
+export type OverviewWorkspaceTab =
+  | 'summary'
+  | 'samples'
+  | 'timeline'
+  | 'review'
+  | 'snapshots';
+
+export type ActivityEventType =
+  | 'experiment_created'
+  | 'metadata_edited'
+  | 'material_changed'
+  | 'lifecycle_transition'
+  | 'milestone_updated'
+  | 'timer_event'
+  | 'observation_logged'
+  | 'survey_dataset_event'
+  | 'instrument_import'
+  | 'measurement_link_changed'
+  | 'quality_review_decision'
+  | 'figure_saved'
+  | 'interpretation_logged'
+  | 'report_finalized'
+  | 'snapshot_created'
+  | 'experiment_archived';
+
+export interface ExperimentActivityEvent {
+  id: string;
+  eventType: ActivityEventType;
+  module: ActiveModule;
+  timestamp: string;
+  experimentUuid: string;
+  sourceKind?: string;
+  sourceId?: string | null;
+  sourceLabel?: string;
+  author: string;
+  description: string;
+}
+
 export type ReportMode = 'pre-experiment' | 'post-experiment';
+
+export type ReportType =
+  | 'research-planning'
+  | 'experiment-progress'
+  | 'survey-analysis'
+  | 'analytical-data'
+  | 'complete-research'
+  | 'data-review-summary';
+
+export type ReportSectionId =
+  | 'identification'
+  | 'objectives_project'
+  | 'materials'
+  | 'planned_vs_actual'
+  | 'timeline_milestones'
+  | 'observations'
+  | 'sample_registry'
+  | 'survey_datasets'
+  | 'analytical_sessions'
+  | 'quality_review'
+  | 'interpretations_conclusions'
+  | 'references'
+  | 'snapshot_provenance';
 
 export interface ReportConfiguration {
   mode: ReportMode;
+  reportType?: ReportType;
+  reportTitle?: string;
+  reportSubtitle?: string;
+  researcherName?: string;
+  reportDate?: string;
+  includeCoverPage?: boolean;
+  includePageNumbers?: boolean;
+  sectionOrder?: ReportSectionId[];
   includeMaterialSnapshots: boolean;
   includeBatchRecords: boolean;
+  includePlannedVsActual?: boolean;
+  includeResearchTimeline?: boolean;
+  includeSampleRegistry?: boolean;
+  includeSnapshotMetadata?: boolean;
   includeSurveyOverview: boolean;
   includeSurveyTable: boolean;
   includeSurveyFigure: boolean;
@@ -505,17 +1008,89 @@ export interface ReportConfiguration {
   includeComparativeSummary: boolean;
   includeAnalyticalRecords: boolean;
   includeRegressionSummary: boolean;
+  /** Phase 4 granular analytical report sections */
+  includeAnalyticalOverview?: boolean;
+  includeCalibrationRecords?: boolean;
+  includeAnalyticalFigures?: boolean;
+  includeDilutionRecords?: boolean;
+  includeAnalyticalQualityReview?: boolean;
+  includeSurveyAnalyticalLinks?: boolean;
   includeDataQualityLimitations: boolean;
   includeResearchInterpretations: boolean;
   includeScientificReferences: boolean;
   includeObservations: boolean;
   includeBenchChecklist: boolean;
+  researcherConclusions?: string;
   /** Selected survey dataset IDs to include in report; empty array means active dataset */
   selectedSurveyDatasetIds: string[];
-  /** Selected saved figure IDs to include in report */
+  /** Selected saved survey figure IDs to include in report */
   selectedFigureIds: string[];
+  /** Selected analytical session IDs to include in report; empty array means active session */
+  selectedAnalyticalSessionIds?: string[];
+  /** Selected saved analytical figure IDs to include in report */
+  selectedAnalyticalFigureIds?: string[];
   institutionHeader: string;
   reportFooterNote: string;
+}
+
+export type ExperimentSnapshotPayload = Omit<
+  Experiment,
+  'snapshots' | 'finalizedReports'
+>;
+
+export interface ExperimentSnapshot {
+  snapshotId: string;
+  name: string;
+  description: string;
+  capturedAt: string;
+  researcher: string;
+  schemaVersion: string;
+  experimentUuid: string;
+  experimentDataVersion: string;
+  calcEngineVersion: string;
+  scientificReviewStatus: ScientificReviewStatus;
+  byteSize: number;
+  payload: ExperimentSnapshotPayload;
+}
+
+export interface FinalizedReport {
+  id: string;
+  versionNumber: number;
+  title: string;
+  reportType: ReportType;
+  snapshotId: string;
+  snapshotName: string;
+  finalizedAt: string;
+  researcher: string;
+  scientificReviewStatus: ScientificReviewStatus;
+  reportConfig: ReportConfiguration;
+  notes: string;
+}
+
+export interface ResearchExportManifestFile {
+  path: string;
+  mimeType: string;
+  bytes: number;
+  description: string;
+}
+
+export interface ResearchExportManifest {
+  format: 'sea-workbench-research-package';
+  experimentUuid: string;
+  experimentId: string;
+  experimentTitle: string;
+  snapshotId: string | null;
+  snapshotName: string | null;
+  appVersion: string;
+  schemaVersion: string;
+  calcEngineVersion: string;
+  exportedAt: string;
+  dataProvenance: DataProvenance[];
+  scientificReviewStatus: ScientificReviewStatus;
+  containsSyntheticData: boolean;
+  includedFiles: ResearchExportManifestFile[];
+  unavailableRecords: string[];
+  notices: string[];
 }
 
 export interface Experiment {
@@ -537,35 +1112,51 @@ export interface Experiment {
   dataVersion: string;
   calcEngineVersion: string;
   batch: BatchConfiguration;
-  /** Mirrors active survey dataset config for backward compatibility */
+  /** Phase 5 structured research planning record */
+  researchPlan?: ResearchPlanMetadata;
+  /** Phase 5 chronological lifecycle transition log */
+  lifecycleHistory?: ExperimentLifecycleEvent[];
+  /** Deterministic compatibility projection of active survey dataset config */
   surveyConfig: SurveyConfiguration;
-  /** Mirrors active survey dataset measurements for backward compatibility */
+  /** Deterministic compatibility projection of active survey dataset measurements */
   surveyMeasurements: SurveyMeasurement[];
-  /** Phase 3 multi-dataset research series collection */
+  /** Authoritative Phase 3+ multi-dataset research series collection */
   surveyDatasets: SurveyDataset[];
   activeSurveyDatasetId: string | null;
   datasetComparison: DatasetComparisonConfig;
+  /** Deterministic compatibility projection of active analytical session config */
   analyticalConfig: AnalyticalConfiguration;
+  /** Deterministic compatibility projection of active calibration dataset standards */
   calibrationStandards: CalibrationStandard[];
+  /** Deterministic compatibility projection of all experiment analytical sample measurements */
   instrumentMeasurements: InstrumentMeasurement[];
+  /** Authoritative Phase 4 multi-session analytical chemistry collection */
+  analyticalSessions: AnalyticalSession[];
+  activeAnalyticalSessionId: string | null;
+  analyticalComparison: AnalyticalComparisonConfig;
   observations: ExperimentalObservation[];
   benchChecklist: BenchChecklistItem[];
+  /** Phase 5 structured milestones (synchronized cleanly with benchChecklist compatibility) */
+  milestones?: ResearchMilestone[];
   benchTimer: BenchTimerState;
+  /** Phase 5 multiple independently named timers */
+  timers?: ResearchTimer[];
   benchLogs: BenchLog[];
+  /** Phase 5 lightweight registry annotations keyed by stable sample ID */
+  sampleRegistryNotes?: SampleRegistryNote[];
+  /** Phase 5 explicit logged activity events (merged with derived history in timeline) */
+  activityEvents?: ExperimentActivityEvent[];
+  /** Phase 5 versioned immutable snapshots of this experiment */
+  snapshots?: ExperimentSnapshot[];
+  /** Phase 5 immutable snapshot-bound finalized reports */
+  finalizedReports?: FinalizedReport[];
   reportConfig: ReportConfiguration;
-}
-
-export interface ExperimentSnapshot {
-  snapshotId: string;
-  capturedAt: string;
-  experimentUuid: string;
-  experimentDataVersion: string;
-  payload: Experiment;
 }
 
 export interface UserPreferences {
   sidebarCollapsed: boolean;
   defaultResearcher: string;
+  lastBackupExportedAt?: string | null;
 }
 
 export interface WorkspaceStateData {
@@ -576,6 +1167,8 @@ export interface WorkspaceStateData {
   activeExperimentUuid: string | null;
   precursors: Precursor[];
   supports: Support[];
+  importMappingTemplates?: ImportMappingTemplate[];
+  experimentTemplates?: ExperimentTemplate[];
   preferences: UserPreferences;
   hasInitializedDemo: boolean;
   lastSavedAt: string | null;

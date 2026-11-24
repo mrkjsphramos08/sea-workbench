@@ -11,6 +11,10 @@ import {
   serializeWorkspaceBackup,
   triggerFileDownload,
 } from '../../services/import-export/backup';
+import {
+  StorageDiagnostics,
+  formatStorageBytes,
+} from '../../services/persistence/storage';
 import { Button, FieldLabel, Modal } from '../../components/ui/Primitives';
 
 export function WorkspaceTransferModal({
@@ -18,11 +22,15 @@ export function WorkspaceTransferModal({
   onClose,
   getSerializableWorkspace,
   onImportWorkspace,
+  storageDiagnostics,
+  onBackupExported,
 }: {
   open: boolean;
   onClose: () => void;
   getSerializableWorkspace: () => WorkspaceStateData;
   onImportWorkspace: (workspace: WorkspaceStateData) => void;
+  storageDiagnostics?: StorageDiagnostics | null;
+  onBackupExported?: () => void;
 }) {
   const [rawText, setRawText] = useState('');
   const [validatedEnvelope, setValidatedEnvelope] =
@@ -53,6 +61,7 @@ export function WorkspaceTransferModal({
       `sea-workbench-backup-${stamp}.json`,
       'application/json;charset=utf-8'
     );
+    onBackupExported?.();
   };
 
   const validateText = (text: string) => {
@@ -106,6 +115,61 @@ export function WorkspaceTransferModal({
       maxWidthClass="max-w-xl"
     >
       <div className="space-y-5">
+        {/* Storage Diagnostics Breakdown */}
+        {storageDiagnostics && (
+          <div className="p-3 bg-white border border-[#E5E7EB] rounded-[6px] space-y-2 text-[11.5px]">
+            <div className="flex items-center justify-between font-mono">
+              <span className="font-semibold text-[#111827] font-sans">
+                Local Storage Diagnostics (UTF-8)
+              </span>
+              <span
+                className={
+                  storageDiagnostics.level === 'critical'
+                    ? 'text-[#DC2626] font-semibold'
+                    : storageDiagnostics.level === 'elevated'
+                      ? 'text-[#B45309] font-semibold'
+                      : 'text-[#4B5563]'
+                }
+              >
+                {formatStorageBytes(storageDiagnostics.totalBytes)} /{' '}
+                {formatStorageBytes(storageDiagnostics.budgetBytes)} (
+                {(storageDiagnostics.usageRatio * 100).toFixed(1)}%)
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 font-mono text-[10.5px] text-[#4B5563]">
+              <div>
+                Experiments: {formatStorageBytes(storageDiagnostics.experimentsBytes)}
+              </div>
+              <div>
+                Snapshots: {formatStorageBytes(storageDiagnostics.snapshotsBytes)}
+              </div>
+              <div>
+                Analytical: {formatStorageBytes(storageDiagnostics.analyticalBytes)}
+              </div>
+              <div>
+                Surveys: {formatStorageBytes(storageDiagnostics.surveyBytes)}
+              </div>
+              <div>
+                Materials DB: {formatStorageBytes(storageDiagnostics.databasesBytes)}
+              </div>
+              <div>
+                Last Backup:{' '}
+                {(() => {
+                  const ts = open
+                    ? getSerializableWorkspace().preferences?.lastBackupExportedAt
+                    : null;
+                  return ts ? ts.slice(0, 10) : 'Never';
+                })()}
+              </div>
+            </div>
+            {storageDiagnostics.recommendationReason && (
+              <p className="text-[11px] text-[#92400E] bg-[#FFFBEB] border border-[#FDE68A] px-2 py-1">
+                {storageDiagnostics.recommendationReason}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Export Section */}
         <div className="p-4 bg-[#F8F9FA] border border-[#E5E7EB] rounded-[6px] flex flex-wrap items-center justify-between gap-3">
           <div>

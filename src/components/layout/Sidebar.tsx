@@ -8,6 +8,7 @@ import {
   FileText,
   FlaskConical,
   FolderKanban,
+  LayoutDashboard,
   Timer,
 } from 'lucide-react';
 import {
@@ -15,7 +16,10 @@ import {
   ActiveModule,
   WORKSPACE_SCHEMA_VERSION,
 } from '../../domain/models/types';
-import { formatStorageBytes } from '../../services/persistence/storage';
+import {
+  StorageDiagnostics,
+  formatStorageBytes,
+} from '../../services/persistence/storage';
 
 interface NavGroup {
   heading: string;
@@ -36,7 +40,8 @@ const NAV_GROUPS: NavGroup[] = [
   {
     heading: 'WORKBENCH',
     items: [
-      { id: 'batch-synthesis', label: 'Batch Synthesis', icon: FlaskConical },
+      { id: 'overview', label: 'Experiment Overview', icon: LayoutDashboard },
+      { id: 'batch-synthesis', label: 'Batch & Planning', icon: FlaskConical },
       { id: 'uptake-survey', label: 'Uptake & PZC Survey', icon: Activity },
       { id: 'analytical', label: 'Dilution & Standards', icon: Beaker },
       { id: 'bench-runner', label: 'Bench Runner', icon: Timer },
@@ -54,15 +59,19 @@ export function Sidebar({
   collapsed,
   storageBytes,
   storageError,
+  storageDiagnostics,
   experimentCount,
   onSelectModule,
+  onOpenBackup,
 }: {
   activeModule: ActiveModule;
   collapsed: boolean;
   storageBytes: number;
   storageError: string | null;
+  storageDiagnostics?: StorageDiagnostics | null;
   experimentCount: number;
   onSelectModule: (mod: ActiveModule) => void;
+  onOpenBackup?: () => void;
 }) {
   return (
     <aside
@@ -146,6 +155,36 @@ export function Sidebar({
             <div className="text-[11px] text-[#6B7280] font-mono tabular-nums">
               {experimentCount} {experimentCount === 1 ? 'record' : 'records'} stored locally
             </div>
+            {storageDiagnostics && (
+              <div className="pt-1 space-y-1">
+                <div className="w-full h-1 bg-[#F3F4F6] overflow-hidden">
+                  <div
+                    className={`h-full ${
+                      storageDiagnostics.level === 'critical'
+                        ? 'bg-[#DC2626]'
+                        : storageDiagnostics.level === 'elevated'
+                          ? 'bg-[#D97706]'
+                          : 'bg-[#0F52BA]'
+                    }`}
+                    style={{
+                      width: `${Math.min(100, Math.max(2, storageDiagnostics.usageRatio * 100))}%`,
+                    }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[10px] font-mono text-[#6B7280]">
+                  <span>{(storageDiagnostics.usageRatio * 100).toFixed(1)}% of 5 MB</span>
+                  {storageDiagnostics.backupRecommended && onOpenBackup && (
+                    <button
+                      type="button"
+                      onClick={onOpenBackup}
+                      className="text-[#0F52BA] hover:underline font-sans font-medium"
+                    >
+                      Backup JSON
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

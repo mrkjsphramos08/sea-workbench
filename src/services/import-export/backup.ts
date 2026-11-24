@@ -2,6 +2,7 @@ import {
   APP_VERSION,
   CalibrationStandard,
   Experiment,
+  ExperimentSnapshot,
   InstrumentMeasurement,
   SurveyDataset,
   SurveyMeasurement,
@@ -11,7 +12,9 @@ import {
 } from '../../domain/models/types';
 import {
   DatasetComparisonSummary,
+  MEASUREMENT_QUALIFIER_LABELS,
   SurveyDatasetAnalysis,
+  resolveEffectiveMeasurementQualifier,
 } from '../../domain/calculations/seaMath';
 import {
   ValidationResult,
@@ -57,6 +60,22 @@ export function serializeSurveyDatasetJson(
         title: experiment.title,
       },
       dataset,
+    },
+    null,
+    2
+  );
+}
+
+export function serializeExperimentSnapshotJson(
+  snapshot: ExperimentSnapshot
+): string {
+  return JSON.stringify(
+    {
+      format: 'sea-workbench-experiment-snapshot',
+      schemaVersion: WORKSPACE_SCHEMA_VERSION,
+      appVersion: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      snapshot,
     },
     null,
     2
@@ -414,6 +433,478 @@ export function exportInstrumentMeasurementsCsv(
   ]);
 
   return buildCsv(headers, dataRows);
+}
+
+/* ============================================================================
+ * PHASE 4 ANALYTICAL CHEMISTRY & INSTRUMENT DATA EXPORTS
+ * ============================================================================ */
+
+export function serializeAnalyticalSessionJson(
+  experiment: Pick<Experiment, 'uuid' | 'experimentId' | 'title'>,
+  session: import('../../domain/models/types').AnalyticalSession
+): string {
+  return JSON.stringify(
+    {
+      format: 'sea-workbench-analytical-session',
+      schemaVersion: WORKSPACE_SCHEMA_VERSION,
+      appVersion: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      experiment: {
+        uuid: experiment.uuid,
+        experimentId: experiment.experimentId,
+        title: experiment.title,
+      },
+      session,
+    },
+    null,
+    2
+  );
+}
+
+export function exportAnalyticalSessionSamplesCsv(
+  experiment: Pick<Experiment, 'experimentId'>,
+  session: import('../../domain/models/types').AnalyticalSession
+): string {
+  const headers = [
+    'Experiment_ID',
+    'Session_ID',
+    'Session_Title',
+    'Technique',
+    'Instrument_Model',
+    'Method_Reference',
+    'Measurement_UUID',
+    'Sample_ID',
+    'Analyte',
+    'Stage',
+    'Classification_Label',
+    'Replicate_ID',
+    'Dilution_Factor',
+    'Reported_Value_Basis',
+    'Raw_Signal',
+    'Signal_Unit',
+    'Reported_Concentration',
+    'Concentration_Unit',
+    'Value_Qualifier',
+    'Value_Qualifier_Label',
+    'Original_Value_Token',
+    'Supplied_Limit_Type',
+    'Supplied_Limit_Value',
+    'Supplied_Limit_Unit',
+    'Original_Imported_Conc',
+    'Original_Imported_Unit',
+    'Calibration_Dataset_ID',
+    'Linked_Survey_Sample_ID',
+    'Linked_Survey_Measurement_UUID',
+    'Instrument_Flag',
+    'Quality_Status',
+    'Exclusion_Reason',
+    'Data_Provenance',
+    'Is_Synthetic_Demo',
+    'Review_Status',
+    'Measurement_Date',
+    'Notes',
+  ];
+
+  const dataRows = (session.sampleMeasurements ?? []).map((m) => {
+    const qualifier = resolveEffectiveMeasurementQualifier(m);
+    return [
+      experiment.experimentId,
+      session.sessionId,
+      session.title,
+      session.technique === 'Other' && session.customTechniqueName
+        ? session.customTechniqueName
+        : session.technique,
+      [session.instrumentManufacturer, session.instrumentModel].filter(Boolean).join(' '),
+      session.methodReference,
+      m.id,
+      m.sampleId,
+      m.analyte,
+      m.stage,
+      m.classificationLabel ?? '',
+      m.replicateId,
+      m.dilutionFactor,
+      m.reportedValueBasis ?? 'unspecified',
+      m.rawSignal,
+      m.signalUnit,
+      m.reportedConc,
+      m.concUnit,
+      qualifier,
+      MEASUREMENT_QUALIFIER_LABELS[qualifier],
+      m.originalValueToken ?? m.originalReportedConc ?? '',
+      m.suppliedLimitType ?? '',
+      m.suppliedLimitValue ?? null,
+      m.suppliedLimitUnit ?? '',
+      m.originalReportedConc ?? '',
+      m.originalConcUnit ?? '',
+      m.calibrationDatasetId ?? '',
+      m.linkedSurveySampleId,
+      m.linkedSurveyMeasurementId ?? '',
+      m.instrumentFlag ?? '',
+      m.qualityStatus,
+      m.exclusionReason ?? '',
+      m.provenance,
+      session.isDemonstration || m.provenance === 'synthetic_demo' ? 'Yes' : 'No',
+      session.scientificReviewStatus,
+      m.measurementDate,
+      m.notes,
+    ];
+  });
+
+  return buildCsv(headers, dataRows);
+}
+
+export function exportCalibrationDatasetCsv(
+  experiment: Pick<Experiment, 'experimentId'>,
+  session: import('../../domain/models/types').AnalyticalSession,
+  calDataset: import('../../domain/models/types').CalibrationDataset
+): string {
+  const analyte = session.analytes.find((a) => a.id === calDataset.analyteId);
+  const headers = [
+    'Experiment_ID',
+    'Session_ID',
+    'Calibration_ID',
+    'Calibration_Title',
+    'Technique',
+    'Analyte',
+    'Wavelength_nm',
+    'Standard_UUID',
+    'Standard_ID',
+    'Is_Blank',
+    'Replicate_Number',
+    'Nominal_Concentration',
+    'Concentration_Unit',
+    'Instrument_Response',
+    'Response_Unit',
+    'Quality_Status',
+    'Exclusion_Reason',
+    'Data_Provenance',
+    'Is_Synthetic_Demo',
+    'Notes',
+  ];
+
+  const dataRows = calDataset.standards.map((s) => [
+    experiment.experimentId,
+    session.sessionId,
+    calDataset.calibrationId,
+    calDataset.title,
+    session.technique,
+    analyte?.symbol ?? '',
+    analyte?.wavelengthNm ?? null,
+    s.id,
+    s.standardId,
+    s.isBlank || s.nominalConc === 0 ? 'Yes' : 'No',
+    s.replicateNumber,
+    s.nominalConc,
+    s.unit,
+    s.instrumentResponse,
+    s.responseUnit,
+    s.qualityStatus,
+    s.exclusionReason ?? '',
+    s.provenance,
+    session.isDemonstration || s.provenance === 'synthetic_demo' ? 'Yes' : 'No',
+    s.notes,
+  ]);
+
+  return buildCsv(headers, dataRows);
+}
+
+export function exportExploratoryRegressionSummaryCsv(
+  experimentId: string,
+  session: import('../../domain/models/types').AnalyticalSession,
+  calDataset: import('../../domain/models/types').CalibrationDataset,
+  analysis: import('../../domain/calculations/analyticalAnalysis').CalibrationDatasetAnalysis
+): string {
+  const reg = analysis.regression;
+  const d = reg.value;
+  const headers = [
+    'Experiment_ID',
+    'Session_ID',
+    'Calibration_ID',
+    'Analysis_Disclaimer',
+    'Regression_Status',
+    'Included_Points_n',
+    'Excluded_Points_n',
+    'Missing_Points_n',
+    'Slope',
+    'Intercept',
+    'R_Squared',
+    'RSS',
+    'SEE',
+    'X_Unit',
+    'Y_Unit',
+    'Contains_Synthetic_Data',
+    'Review_Status',
+    'Engine_Version',
+  ];
+
+  return buildCsv(headers, [
+    [
+      experimentId,
+      session.sessionId,
+      calDataset.calibrationId,
+      'Exploratory Numerical Analysis — Not Analytical Method Validation',
+      reg.status,
+      analysis.includedCount,
+      analysis.excludedCount,
+      analysis.missingCount,
+      d?.slope ?? null,
+      d?.intercept ?? null,
+      d?.rSquared ?? null,
+      d?.rss ?? null,
+      d?.standardErrorOfEstimate ?? null,
+      calDataset.concUnit,
+      calDataset.responseUnit,
+      analysis.containsSynthetic ? 'Yes' : 'No',
+      session.scientificReviewStatus,
+      analysis.engineVersion,
+    ],
+  ]);
+}
+
+export function exportRegressionResidualsCsv(
+  experimentId: string,
+  session: import('../../domain/models/types').AnalyticalSession,
+  calDataset: import('../../domain/models/types').CalibrationDataset,
+  analysis: import('../../domain/calculations/analyticalAnalysis').CalibrationDatasetAnalysis
+): string {
+  const headers = [
+    'Experiment_ID',
+    'Session_ID',
+    'Calibration_ID',
+    'Standard_UUID',
+    'Standard_ID',
+    'Nominal_Concentration',
+    'Concentration_Unit',
+    'Observed_Response',
+    'Fitted_Response',
+    'Residual (y - yHat)',
+    'Response_Unit',
+    'Quality_Status',
+    'Data_Provenance',
+    'Analysis_Disclaimer',
+    'Engine_Version',
+  ];
+
+  const dataRows = analysis.diagnosticPoints.map((pt) => [
+    experimentId,
+    session.sessionId,
+    calDataset.calibrationId,
+    pt.id,
+    pt.standardId,
+    pt.nominalConc,
+    calDataset.concUnit,
+    pt.observedResponse,
+    pt.fittedResponse,
+    pt.residual,
+    calDataset.responseUnit,
+    pt.qualityStatus,
+    pt.provenance,
+    'Exploratory Numerical Analysis — Not Analytical Method Validation',
+    analysis.engineVersion,
+  ]);
+
+  return buildCsv(headers, dataRows);
+}
+
+export function exportAnalyticalReplicateStatsCsv(
+  experimentId: string,
+  session: import('../../domain/models/types').AnalyticalSession,
+  groups: ReturnType<
+    typeof import('../../domain/calculations/analyticalAnalysis').computeAnalyticalReplicateGroups
+  >
+): string {
+  const headers = [
+    'Experiment_ID',
+    'Session_ID',
+    'Sample_ID',
+    'Analyte',
+    'Stage',
+    'Unit',
+    'Total_n',
+    'Included_n',
+    'Excluded_n',
+    'Mean_Conc',
+    'Median_Conc',
+    'Sample_SD_Conc',
+    'SEM_Conc',
+    'RSD_Percent (%)',
+    'Min_Conc',
+    'Max_Conc',
+    'Is_Synthetic_Demo',
+  ];
+
+  const dataRows = groups.map((g) => [
+    experimentId,
+    session.sessionId,
+    g.sampleId,
+    g.analyte,
+    g.stage,
+    g.unit,
+    g.totalCount,
+    g.includedCount,
+    g.excludedCount,
+    g.concStats.value.mean,
+    g.concStats.value.median,
+    g.concStats.value.sampleStdDev,
+    g.concStats.value.sem,
+    g.concStats.value.rsdPercent,
+    g.concStats.value.min,
+    g.concStats.value.max,
+    session.isDemonstration ? 'Yes' : 'No',
+  ]);
+
+  return buildCsv(headers, dataRows);
+}
+
+export function exportDilutionRecordsCsv(
+  experimentId: string,
+  session: import('../../domain/models/types').AnalyticalSession
+): string {
+  const headers = [
+    'Experiment_ID',
+    'Session_ID',
+    'Dilution_Record_UUID',
+    'Sample_Measurement_UUID',
+    'Sample_ID',
+    'Stage',
+    'Recorded_Dilution_Factor',
+    'Source_Volume (mL)',
+    'Final_Volume (mL)',
+    'Concentration_Unit',
+    'Reported_Value_Basis',
+    'Preparation_Reference',
+    'Matrix_Description',
+    'Analyst',
+    'Date',
+    'Verification_Status',
+    'Data_Provenance',
+    'Notes',
+  ];
+
+  const dataRows = (session.dilutionRecords ?? []).map((d) => [
+    experimentId,
+    session.sessionId,
+    d.id,
+    d.sampleMeasurementId ?? '',
+    d.sampleId,
+    d.stage,
+    d.dilutionFactor,
+    d.sourceVolumeMl,
+    d.finalVolumeMl,
+    d.concUnit,
+    d.reportedValueBasis,
+    d.preparationReference,
+    d.matrixDescription,
+    d.analyst,
+    d.date,
+    d.verificationStatus,
+    d.provenance,
+    d.notes,
+  ]);
+
+  return buildCsv(headers, dataRows);
+}
+
+export function exportQualityReviewCsv(
+  experimentId: string,
+  session: import('../../domain/models/types').AnalyticalSession,
+  issues: import('../../domain/calculations/analyticalAnalysis').DetectedAnalyticalIssue[]
+): string {
+  const headers = [
+    'Experiment_ID',
+    'Session_ID',
+    'Issue_Key',
+    'Category',
+    'Record_UUID',
+    'Record_Label',
+    'Review_Status',
+    'Description',
+    'Data_Provenance',
+    'Researcher_Notes',
+    'History_Entries',
+  ];
+
+  const dataRows = issues.map((issue) => [
+    experimentId,
+    session.sessionId,
+    issue.issueKey,
+    issue.category,
+    issue.recordId,
+    issue.recordLabel,
+    issue.effectiveStatus,
+    issue.description,
+    issue.provenance,
+    issue.persistedReview?.researcherNotes ?? '',
+    issue.persistedReview?.history.length ?? 0,
+  ]);
+
+  return buildCsv(headers, dataRows);
+}
+
+export function exportMeasurementLinkageCsv(
+  experiment: Experiment
+): string {
+  const headers = [
+    'Experiment_ID',
+    'Survey_Dataset_ID',
+    'Survey_Measurement_UUID',
+    'Survey_Sample_ID',
+    'Stage',
+    'Survey_Recorded_Conc (ppm)',
+    'Linked_Analytical_UUID',
+    'Analytical_Sample_ID',
+    'Analytical_Reported_Conc',
+    'Analytical_Unit',
+    'Analytical_Dilution_Factor',
+    'Reported_Value_Basis',
+    'Status',
+  ];
+
+  const allInstrument = experiment.instrumentMeasurements ?? [];
+  const instById = new Map(allInstrument.map((i) => [i.id, i]));
+  const rows: Array<Array<string | number | null | undefined>> = [];
+
+  for (const ds of experiment.surveyDatasets ?? []) {
+    for (const sm of ds.measurements ?? []) {
+      const pairs: Array<{
+        stage: 'Initial' | 'Final';
+        surveyConc: number | null;
+        linkedId: string | null;
+      }> = [
+        {
+          stage: 'Initial',
+          surveyConc: sm.initialConcPpm,
+          linkedId: sm.linkedInitialMeasurementId,
+        },
+        {
+          stage: 'Final',
+          surveyConc: sm.finalConcPpm,
+          linkedId: sm.linkedFinalMeasurementId,
+        },
+      ];
+      for (const p of pairs) {
+        if (!p.linkedId) continue;
+        const inst = instById.get(p.linkedId);
+        rows.push([
+          experiment.experimentId,
+          ds.datasetId,
+          sm.id,
+          sm.sampleId,
+          p.stage,
+          p.surveyConc,
+          p.linkedId,
+          inst?.sampleId ?? '',
+          inst?.reportedConc ?? null,
+          inst?.concUnit ?? '',
+          inst?.dilutionFactor ?? null,
+          inst?.reportedValueBasis ?? 'unspecified',
+          inst ? 'Linked' : 'Source Unavailable',
+        ]);
+      }
+    }
+  }
+
+  return buildCsv(headers, rows);
 }
 
 export function triggerFileDownload(

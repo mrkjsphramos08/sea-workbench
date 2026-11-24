@@ -12,15 +12,28 @@ import { parseOptionalNumber } from '../../domain/calculations/seaMath';
 export function Panel({
   children,
   className = '',
+  title,
+  subtitle,
+  actions,
 }: {
   children: React.ReactNode;
   className?: string;
+  title?: string;
+  subtitle?: string;
+  actions?: React.ReactNode;
 }) {
   return (
     <section
       className={`bg-white border border-[#E5E7EB] rounded-[8px] ${className}`}
     >
-      {children}
+      {title ? (
+        <>
+          <PanelHeader title={title} subtitle={subtitle} actions={actions} />
+          <div className="p-4">{children}</div>
+        </>
+      ) : (
+        children
+      )}
     </section>
   );
 }
@@ -297,21 +310,41 @@ export function VerificationIndicator({
   );
 }
 
-export function StatusText({ status }: { status: ExperimentStatus }) {
-  const color =
-    status === 'Completed'
+export function StatusText({
+  status,
+  label,
+  tone,
+}: {
+  status?: ExperimentStatus;
+  label?: string;
+  tone?: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+}) {
+  const text = label ?? status ?? '';
+  const color = tone
+    ? tone === 'success'
       ? 'text-[#065F46]'
-      : status === 'In Progress'
+      : tone === 'info'
         ? 'text-[#0F52BA]'
-        : status === 'Planned'
+        : tone === 'warning'
           ? 'text-[#92400E]'
-          : status === 'Archived'
+          : tone === 'danger'
+            ? 'text-[#991B1B]'
+            : 'text-[#4B5563]'
+    : text === 'Completed'
+      ? 'text-[#065F46]'
+      : text === 'In Progress' || text === 'Analysis in Progress'
+        ? 'text-[#0F52BA]'
+        : text === 'Planned' ||
+            text === 'Measurements Pending' ||
+            text === 'Under Review'
+          ? 'text-[#92400E]'
+          : text === 'Archived'
             ? 'text-[#6B7280]'
             : 'text-[#4B5563]';
 
   return (
     <span className={`text-[12px] font-medium whitespace-nowrap ${color}`}>
-      {status}
+      {text}
     </span>
   );
 }

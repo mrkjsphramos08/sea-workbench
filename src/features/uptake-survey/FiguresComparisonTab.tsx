@@ -26,6 +26,7 @@ import {
 } from '../../domain/models/types';
 import {
   buildDatasetComparison,
+  evaluateFigureReproducibility,
   formatScientificNumber,
 } from '../../domain/calculations/seaMath';
 import {
@@ -814,44 +815,66 @@ export function FiguresComparisonTab({
                 </p>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {dataset.savedFigures.map((fig) => (
-                    <div
-                      key={fig.id}
-                      className="p-2.5 border border-[#E5E7EB] rounded-[6px] bg-[#F8F9FA] flex items-center justify-between gap-2"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-[12px] font-semibold text-[#111827] truncate flex items-center gap-1.5">
-                          <Bookmark
-                            className="w-3.5 h-3.5 text-[#0F52BA] shrink-0"
-                            strokeWidth={1.75}
-                          />
-                          <span className="truncate">{fig.name}</span>
+                  {dataset.savedFigures.map((fig) => {
+                    const repro = evaluateFigureReproducibility(
+                      experiment,
+                      'survey',
+                      fig,
+                      dataset.id
+                    );
+                    return (
+                      <div
+                        key={fig.id}
+                        className="p-2.5 border border-[#E5E7EB] rounded-[6px] bg-[#F8F9FA] flex items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-[12px] font-semibold text-[#111827] truncate flex items-center gap-1.5">
+                            <Bookmark
+                              className="w-3.5 h-3.5 text-[#0F52BA] shrink-0"
+                              strokeWidth={1.75}
+                            />
+                            <span className="truncate">{fig.name}</span>
+                          </div>
+                          <div className="text-[10.5px] font-mono text-[#6B7280] mt-0.5 flex flex-wrap items-center gap-1.5">
+                            <span>
+                              {fig.plotType} ·{' '}
+                              {fig.grayscaleMode ? 'Grayscale' : 'Color'} ·{' '}
+                              {fig.exportScale}× PNG
+                            </span>
+                            <span
+                              title={repro.message}
+                              className={`px-1 py-0.25 border text-[9.5px] ${
+                                repro.status === 'saved_current'
+                                  ? 'bg-[#ECFDF5] border-[#A7F3D0] text-[#065F46]'
+                                  : repro.status === 'legacy_untracked'
+                                    ? 'bg-[#F3F4F6] border-[#E5E7EB] text-[#4B5563]'
+                                    : 'bg-[#FFFBEB] border-[#FDE68A] text-[#92400E]'
+                              }`}
+                            >
+                              {repro.label}
+                            </span>
+                          </div>
                         </div>
-                        <div className="text-[10.5px] font-mono text-[#6B7280] mt-0.5">
-                          {fig.plotType} ·{' '}
-                          {fig.grayscaleMode ? 'Grayscale' : 'Color'} ·{' '}
-                          {fig.exportScale}× PNG
+                        <div className="flex items-center gap-1 shrink-0">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => onLoadFigurePreset(fig.id)}
+                          >
+                            Load
+                          </Button>
+                          <button
+                            type="button"
+                            aria-label={`Delete preset ${fig.name}`}
+                            onClick={() => onDeleteFigurePreset(fig.id)}
+                            className="p-1 text-[#9CA3AF] hover:text-[#991B1B] cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                          </button>
                         </div>
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => onLoadFigurePreset(fig.id)}
-                        >
-                          Load
-                        </Button>
-                        <button
-                          type="button"
-                          aria-label={`Delete preset ${fig.name}`}
-                          onClick={() => onDeleteFigurePreset(fig.id)}
-                          className="p-1 text-[#9CA3AF] hover:text-[#991B1B] cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

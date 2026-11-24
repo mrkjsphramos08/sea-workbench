@@ -46,6 +46,8 @@ import { ResearchInterpretationTab } from './ResearchInterpretationTab';
 export interface UptakeSurveyWorkspaceProps {
   experiment: Experiment;
   allExperiments: Experiment[];
+  requestedTab?: SurveyWorkspaceTab | null;
+  navigationNonce?: number;
   onSelectDataset: (datasetId: string) => void;
   onCreateDataset: (input: {
     datasetId?: string;
@@ -121,7 +123,22 @@ const WORKSPACE_TABS: Array<{
 
 export function UptakeSurveyWorkspace(props: UptakeSurveyWorkspaceProps) {
   const { experiment } = props;
-  const [activeTab, setActiveTab] = useState<SurveyWorkspaceTab>('overview');
+  const [tabState, setTabState] = useState<{
+    nonce: number | undefined;
+    tab: SurveyWorkspaceTab;
+  }>({
+    nonce: props.navigationNonce,
+    tab: props.requestedTab ?? 'overview',
+  });
+  const activeTab: SurveyWorkspaceTab =
+    props.requestedTab &&
+    props.navigationNonce !== undefined &&
+    tabState.nonce !== props.navigationNonce
+      ? props.requestedTab
+      : tabState.tab;
+  const setActiveTab = (tab: SurveyWorkspaceTab) => {
+    setTabState({ nonce: props.navigationNonce, tab });
+  };
   const [datasetSearch, setDatasetSearch] = useState('');
   const [datasetModeFilter, setDatasetModeFilter] = useState<
     'all' | 'uptake' | 'pzc' | 'archived'

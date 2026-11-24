@@ -1,26 +1,63 @@
 'use client';
 
-import React, { useMemo } from 'react';
-import { Printer } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  BookmarkCheck,
+  Lock,
+  Package,
+  Printer,
+  RotateCcw,
+  Trash2,
+} from 'lucide-react';
 import {
   APP_VERSION,
+  AnalyticalFigureConfiguration,
+  AnalyticalSession,
+  CALC_ENGINE_VERSION,
   Experiment,
+  ExperimentSnapshot,
   FigureConfiguration,
+  FinalizedReport,
   ReportConfiguration,
   ReportMode,
+  ReportSectionId,
+  ReportType,
   ResearchProject,
   SurveyDataset,
+  WORKSPACE_SCHEMA_VERSION,
 } from '../../domain/models/types';
 import {
+  getAllExperimentInstrumentMeasurements,
+  getAllExperimentSurveyMeasurements,
+} from '../../domain/models/projections';
+import {
+  DEFAULT_REPORT_SECTION_ORDER,
+  REPORT_SECTION_LABELS,
+  REPORT_TYPE_PRESETS,
+  analyzeCalibrationDataset,
   analyzeSurveyDataset,
   buildDatasetComparison,
-  evaluateAnalyticalBoundary,
+  buildExperimentTimeline,
+  buildUnifiedSampleRegistry,
+  detectAnalyticalQualityIssues,
   evaluateBatchSynthesisBoundary,
+  evaluateDilutionConsistency,
   evaluateSurveyCompleteness,
+  formatQualifiedMeasurementValue,
   formatScientificNumber,
   formatWithScientificNotation,
+  hasExperimentChangedSinceSnapshot,
+  resolveSurveyAnalyticalLinks,
 } from '../../domain/calculations/seaMath';
+import {
+  buildResearchExportPackage,
+  triggerBinaryDownload,
+} from '../../services/import-export/researchPackage';
 import { ScientificFigureCanvas } from '../../components/charts/ScientificFigureCanvas';
+import { AnalyticalFigureCanvas } from '../../components/charts/AnalyticalFigureCanvas';
 import { ANNOTATION_CATEGORY_LABELS } from '../uptake-survey/ResearchInterpretationTab';
 import {
   Button,
@@ -30,32 +67,109 @@ import {
   inputBaseClass,
 } from '../../components/ui/Primitives';
 
+const REPORT_TYPE_KEYS: ReportType[] = [
+  'research-planning',
+  'experiment-progress',
+  'survey-analysis',
+  'analytical-data',
+  'complete-research',
+  'data-review-summary',
+];
+
 export function LabReportWorkspace({
   experiment,
   allExperiments = [],
   projects,
   onUpdateReportConfig,
+  onCreateFinalizedReport,
+  onDeleteFinalizedReport,
 }: {
   experiment: Experiment;
   allExperiments?: Experiment[];
   projects: ResearchProject[];
   onUpdateReportConfig: (patch: Partial<ReportConfiguration>) => void;
+  onCreateFinalizedReport?: (input: {
+    title: string;
+    notes?: string;
+    snapshotId?: string;
+    snapshotName?: string;
+  }) => FinalizedReport | null | void;
+  onDeleteFinalizedReport?: (reportId: string) => void;
 }) {
-  const { reportConfig } = experiment;
-  const project = experiment.projectId
-    ? projects.find((p) => p.id === experiment.projectId) ?? null
+  const [selectedFinalizedId, setSelectedFinalizedId] = useState<string | null>(
+    null
+  );
+  const [showFinalizeForm, setShowFinalizeForm] = useState(false);
+  const [finalizeTitle, setFinalizeTitle] = useState('');
+  const [finalizeNotes, setFinalizeNotes] = useState('');
+  const [finalizeSnapshotChoice, setFinalizeSnapshotChoice] = useState('new');
+  const [showSectionOrder, setShowSectionOrder] = useState(false);
+  const [exportStatusMsg, setExportStatusMsg] = useState<string | null>(null);
+
+  const finalizedReports = useMemo(
+    () => experiment.finalizedReports ?? [],
+    [experiment.finalizedReports]
+  );
+  const snapshots = useMemo(
+    () => experiment.snapshots ?? [],
+    [experiment.snapshots]
+  );
+
+  const activeFinalizedReport: FinalizedReport | null = useMemo(() => {
+    if (!selectedFinalizedId) return null;
+    return finalizedReports.find((r) => r.id === selectedFinalizedId) ?? null;
+  }, [finalizedReports, selectedFinalizedId]);
+
+  const boundSnapshot: ExperimentSnapshot | null = useMemo(() => {
+    if (!activeFinalizedReport) return null;
+    return (
+      snapshots.find(
+        (s) => s.snapshotId === activeFinalizedReport.snapshotId
+      ) ?? null
+    );
+  }, [activeFinalizedReport, snapshots]);
+
+  // When viewing a Finalized Report, render from its immutable bound snapshot payload
+  // so subsequent live experiment edits NEVER mutate the archived report.
+  const effectiveExperiment: Experiment = useMemo(() => {
+    if (!activeFinalizedReport || !boundSnapshot) {
+      return experiment;
+    }
+    return {
+      ...boundSnapshot.payload,
+      snapshots: experiment.snapshots,
+      finalizedReports: experiment.finalizedReports,
+      reportConfig: activeFinalizedReport.reportConfig,
+    };
+  }, [activeFinalizedReport, boundSnapshot, experiment]);
+
+  const reportConfig: ReportConfiguration = activeFinalizedReport
+    ? activeFinalizedReport.reportConfig
+    : experiment.reportConfig;
+
+  const isViewingFinalized = Boolean(activeFinalizedReport);
+
+  const liveChangedSinceFinalized = useMemo(() => {
+    if (!boundSnapshot) return false;
+    return hasExperimentChangedSinceSnapshot(experiment, boundSnapshot);
+  }, [experiment, boundSnapshot]);
+
+  const project = effectiveExperiment.projectId
+    ? projects.find((p) => p.id === effectiveExperiment.projectId) ?? null
     : null;
-  const supportSnap = experiment.batch.supportSnapshot?.supportData ?? null;
-  const precursorSnap = experiment.batch.precursorSnapshot?.precursorData ?? null;
+  const supportSnap =
+    effectiveExperiment.batch.supportSnapshot?.supportData ?? null;
+  const precursorSnap =
+    effectiveExperiment.batch.precursorSnapshot?.precursorData ?? null;
 
   const calcBoundary = useMemo(
-    () => evaluateBatchSynthesisBoundary(experiment.batch),
-    [experiment.batch]
+    () => evaluateBatchSynthesisBoundary(effectiveExperiment.batch),
+    [effectiveExperiment.batch]
   );
 
   // Resolve selected survey datasets (default to active dataset if empty)
   const selectedDatasets: SurveyDataset[] = useMemo(() => {
-    const allDs = experiment.surveyDatasets ?? [];
+    const allDs = effectiveExperiment.surveyDatasets ?? [];
     if (allDs.length === 0) return [];
     if (
       reportConfig.selectedSurveyDatasetIds &&
@@ -67,15 +181,16 @@ export function LabReportWorkspace({
       if (matched.length > 0) return matched;
     }
     const active =
-      allDs.find((d) => d.id === experiment.activeSurveyDatasetId) ?? allDs[0];
+      allDs.find((d) => d.id === effectiveExperiment.activeSurveyDatasetId) ??
+      allDs[0];
     return active ? [active] : [];
   }, [
-    experiment.surveyDatasets,
-    experiment.activeSurveyDatasetId,
+    effectiveExperiment.surveyDatasets,
+    effectiveExperiment.activeSurveyDatasetId,
     reportConfig.selectedSurveyDatasetIds,
   ]);
 
-  // Precompute shared analysis & completeness for every selected dataset (single source of truth)
+  // Precompute shared analysis & completeness for every selected dataset
   const datasetReports = useMemo(() => {
     return selectedDatasets.map((ds) => ({
       dataset: ds,
@@ -84,12 +199,11 @@ export function LabReportWorkspace({
       }),
       completeness: evaluateSurveyCompleteness(
         ds,
-        experiment.instrumentMeasurements
+        effectiveExperiment.instrumentMeasurements
       ),
     }));
-  }, [selectedDatasets, experiment.instrumentMeasurements]);
+  }, [selectedDatasets, effectiveExperiment.instrumentMeasurements]);
 
-  // All saved figures across selected datasets
   const availableSavedFigures = useMemo(() => {
     const figs: Array<{ dataset: SurveyDataset; figure: FigureConfiguration }> =
       [];
@@ -101,10 +215,12 @@ export function LabReportWorkspace({
     return figs;
   }, [selectedDatasets]);
 
-  // Comparative summary using shared buildDatasetComparison
   const comparativeSummary = useMemo(() => {
-    const refs = experiment.datasetComparison?.selectedRefs ?? [];
-    const expPool = allExperiments.length > 0 ? allExperiments : [experiment];
+    const refs = effectiveExperiment.datasetComparison?.selectedRefs ?? [];
+    const expPool =
+      !isViewingFinalized && allExperiments.length > 0
+        ? allExperiments
+        : [effectiveExperiment];
     const items: Array<{ experiment: Experiment; dataset: SurveyDataset }> = [];
     for (const ref of refs) {
       const exp = expPool.find((e) => e.uuid === ref.experimentUuid);
@@ -113,31 +229,151 @@ export function LabReportWorkspace({
     }
     if (items.length < 2 && selectedDatasets.length >= 2) {
       return buildDatasetComparison(
-        selectedDatasets.map((ds) => ({ experiment, dataset: ds }))
+        selectedDatasets.map((ds) => ({
+          experiment: effectiveExperiment,
+          dataset: ds,
+        }))
       );
     }
     return buildDatasetComparison(items);
   }, [
-    experiment,
+    effectiveExperiment,
     allExperiments,
     selectedDatasets,
+    isViewingFinalized,
   ]);
 
-  const analyticalBoundary = useMemo(
-    () =>
-      evaluateAnalyticalBoundary(
-        experiment.calibrationStandards,
-        experiment.instrumentMeasurements,
-        experiment.analyticalConfig
-      ),
-    [
-      experiment.calibrationStandards,
-      experiment.instrumentMeasurements,
-      experiment.analyticalConfig,
-    ]
+  // Phase 4: Resolve selected analytical sessions
+  const selectedAnalyticalSessions: AnalyticalSession[] = useMemo(() => {
+    const allSessions = effectiveExperiment.analyticalSessions ?? [];
+    if (allSessions.length === 0) return [];
+    const chosenIds = reportConfig.selectedAnalyticalSessionIds ?? [];
+    if (chosenIds.length > 0) {
+      const matched = allSessions.filter((s) => chosenIds.includes(s.id));
+      if (matched.length > 0) return matched;
+    }
+    const active =
+      allSessions.find(
+        (s) => s.id === effectiveExperiment.activeAnalyticalSessionId
+      ) ?? allSessions[0];
+    return active ? [active] : [];
+  }, [
+    effectiveExperiment.analyticalSessions,
+    effectiveExperiment.activeAnalyticalSessionId,
+    reportConfig.selectedAnalyticalSessionIds,
+  ]);
+
+  const analyticalSessionReports = useMemo(() => {
+    return selectedAnalyticalSessions.map((session) => {
+      const activeCal =
+        session.calibrationDatasets.find(
+          (c) => c.id === session.activeCalibrationDatasetId
+        ) ??
+        session.calibrationDatasets[0] ??
+        null;
+      const calAnalyses = session.calibrationDatasets.map((cal) => ({
+        dataset: cal,
+        analysis: analyzeCalibrationDataset(cal),
+      }));
+      const activeCalAnalysis = activeCal
+        ? calAnalyses.find((c) => c.dataset.id === activeCal.id)?.analysis ??
+          null
+        : null;
+      const dilutionDiagnostics = evaluateDilutionConsistency(session);
+      const qualityIssues = detectAnalyticalQualityIssues(
+        effectiveExperiment,
+        session
+      );
+      const reviewMap = new Map(
+        session.reviewRecords.map((r) => [r.issueKey, r])
+      );
+      return {
+        session,
+        activeCal,
+        activeCalAnalysis,
+        calAnalyses,
+        dilutionDiagnostics,
+        qualityIssues,
+        reviewMap,
+      };
+    });
+  }, [selectedAnalyticalSessions, effectiveExperiment]);
+
+  const availableSavedAnalyticalFigures = useMemo(() => {
+    const figs: Array<{
+      session: AnalyticalSession;
+      figure: AnalyticalFigureConfiguration;
+    }> = [];
+    for (const s of selectedAnalyticalSessions) {
+      for (const f of s.savedFigures ?? []) {
+        figs.push({ session: s, figure: f });
+      }
+    }
+    return figs;
+  }, [selectedAnalyticalSessions]);
+
+  const surveyAnalyticalLinkSummary = useMemo(() => {
+    const allSurvey = getAllExperimentSurveyMeasurements(effectiveExperiment);
+    const allInst = getAllExperimentInstrumentMeasurements(effectiveExperiment);
+    const linkMap = resolveSurveyAnalyticalLinks(
+      allSurvey.map((s) => s.measurement),
+      allInst
+    );
+    const rows: Array<{
+      datasetId: string;
+      sampleId: string;
+      stage: 'Initial' | 'Final';
+      surveyValue: number | null;
+      analyticalSampleId: string;
+      effectiveConc: number | null;
+      hasDiscrepancy: boolean;
+      sourceUnavailable: boolean;
+    }> = [];
+    for (const entry of allSurvey) {
+      const link = linkMap[entry.measurement.id];
+      if (!link) continue;
+      if (entry.measurement.linkedInitialMeasurementId) {
+        rows.push({
+          datasetId: entry.datasetCode,
+          sampleId: entry.measurement.sampleId,
+          stage: 'Initial',
+          surveyValue: entry.measurement.initialConcPpm,
+          analyticalSampleId:
+            link.initial.linkedRecord?.sampleId ??
+            entry.measurement.linkedInitialMeasurementId,
+          effectiveConc: link.initial.linkedEffectiveConcPpm,
+          hasDiscrepancy: link.initial.hasDiscrepancy,
+          sourceUnavailable: link.initial.sourceUnavailable,
+        });
+      }
+      if (entry.measurement.linkedFinalMeasurementId) {
+        rows.push({
+          datasetId: entry.datasetCode,
+          sampleId: entry.measurement.sampleId,
+          stage: 'Final',
+          surveyValue: entry.measurement.finalConcPpm,
+          analyticalSampleId:
+            link.final.linkedRecord?.sampleId ??
+            entry.measurement.linkedFinalMeasurementId,
+          effectiveConc: link.final.linkedEffectiveConcPpm,
+          hasDiscrepancy: link.final.hasDiscrepancy,
+          sourceUnavailable: link.final.sourceUnavailable,
+        });
+      }
+    }
+    return rows;
+  }, [effectiveExperiment]);
+
+  const sampleRegistrySummary = useMemo(
+    () => buildUnifiedSampleRegistry(effectiveExperiment),
+    [effectiveExperiment]
   );
 
-  // Deduplicated scientific references from material snapshots
+  const timelineSummary = useMemo(
+    () => buildExperimentTimeline(effectiveExperiment),
+    [effectiveExperiment]
+  );
+
   const allScientificReferences = useMemo(() => {
     const seen = new Set<string>();
     const list: Array<{
@@ -183,8 +419,41 @@ export function LabReportWorkspace({
     []
   );
 
+  const activeSectionOrder: ReportSectionId[] = useMemo(() => {
+    const raw =
+      reportConfig.sectionOrder && reportConfig.sectionOrder.length > 0
+        ? reportConfig.sectionOrder
+        : DEFAULT_REPORT_SECTION_ORDER;
+    const merged = [...raw];
+    for (const id of DEFAULT_REPORT_SECTION_ORDER) {
+      if (!merged.includes(id)) merged.push(id);
+    }
+    return merged;
+  }, [reportConfig.sectionOrder]);
+
+  const moveSection = (index: number, direction: -1 | 1) => {
+    if (isViewingFinalized) return;
+    const target = index + direction;
+    if (target < 0 || target >= activeSectionOrder.length) return;
+    const next = [...activeSectionOrder];
+    const [item] = next.splice(index, 1);
+    next.splice(target, 0, item);
+    onUpdateReportConfig({ sectionOrder: next });
+  };
+
   const handleModeChange = (mode: ReportMode) => {
+    if (isViewingFinalized) return;
     onUpdateReportConfig({ mode });
+  };
+
+  const handleApplyPreset = (presetKey: ReportType) => {
+    if (isViewingFinalized) return;
+    const preset = REPORT_TYPE_PRESETS[presetKey];
+    if (!preset) return;
+    onUpdateReportConfig({
+      ...preset.patch,
+      reportType: presetKey,
+    });
   };
 
   const handlePrint = () => {
@@ -193,7 +462,45 @@ export function LabReportWorkspace({
     }
   };
 
+  const handleExportZipPackage = () => {
+    const pkg = buildResearchExportPackage(experiment, {
+      snapshot: boundSnapshot ?? undefined,
+    });
+    triggerBinaryDownload(pkg.zipBytes, pkg.filename, 'application/zip');
+    setExportStatusMsg(
+      `Exported ${pkg.filename} (${pkg.entries.length} files, ${(
+        pkg.zipBytes.length / 1024
+      ).toFixed(1)} KB).`
+    );
+  };
+
+  const handleCreateFinalized = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onCreateFinalizedReport) return;
+    const defaultTitle =
+      reportConfig.reportTitle?.trim() ||
+      `${REPORT_TYPE_PRESETS[reportConfig.reportType ?? 'complete-research']?.label ?? 'Research Report'} — ${experiment.experimentId}`;
+    const created = onCreateFinalizedReport({
+      title: finalizeTitle.trim() || defaultTitle,
+      notes: finalizeNotes.trim(),
+      snapshotId:
+        finalizeSnapshotChoice !== 'new' ? finalizeSnapshotChoice : undefined,
+      snapshotName:
+        finalizeSnapshotChoice === 'new'
+          ? `Report v${finalizedReports.length + 1} Snapshot`
+          : undefined,
+    });
+    setFinalizeTitle('');
+    setFinalizeNotes('');
+    setFinalizeSnapshotChoice('new');
+    setShowFinalizeForm(false);
+    if (created && typeof created === 'object' && 'id' in created) {
+      setSelectedFinalizedId(created.id);
+    }
+  };
+
   const toggleReportDataset = (dsId: string) => {
+    if (isViewingFinalized) return;
     const current = selectedDatasets.map((d) => d.id);
     const exists = current.includes(dsId);
     const next = exists
@@ -203,6 +510,7 @@ export function LabReportWorkspace({
   };
 
   const toggleReportFigure = (figId: string) => {
+    if (isViewingFinalized) return;
     const current = reportConfig.selectedFigureIds ?? [];
     const exists = current.includes(figId);
     const next = exists
@@ -211,19 +519,68 @@ export function LabReportWorkspace({
     onUpdateReportConfig({ selectedFigureIds: next });
   };
 
-  const calXUnit =
-    experiment.calibrationStandards[0]?.unit ||
-    experiment.analyticalConfig.calibrationUnits ||
-    'ppm';
-  const calYUnit = experiment.calibrationStandards[0]?.responseUnit || 'cps';
+  const toggleAnalyticalSession = (sessionId: string) => {
+    if (isViewingFinalized) return;
+    const current = selectedAnalyticalSessions.map((s) => s.id);
+    const exists = current.includes(sessionId);
+    const next = exists
+      ? current.filter((id) => id !== sessionId)
+      : [...current, sessionId];
+    onUpdateReportConfig({ selectedAnalyticalSessionIds: next });
+  };
+
+  const toggleAnalyticalFigure = (figId: string) => {
+    if (isViewingFinalized) return;
+    const current = reportConfig.selectedAnalyticalFigureIds ?? [];
+    const exists = current.includes(figId);
+    const next = exists
+      ? current.filter((id) => id !== figId)
+      : [...current, figId];
+    onUpdateReportConfig({ selectedAnalyticalFigureIds: next });
+  };
+
+  const showAnalyticalOverview =
+    reportConfig.includeAnalyticalOverview ??
+    reportConfig.includeAnalyticalRecords;
+  const showCalibrationRecords =
+    reportConfig.includeCalibrationRecords ??
+    reportConfig.includeRegressionSummary;
+  const showAnalyticalFigures =
+    reportConfig.includeAnalyticalFigures ??
+    reportConfig.includeRegressionSummary;
+  const showDilutionRecords =
+    reportConfig.includeDilutionRecords ?? reportConfig.includeAnalyticalRecords;
+  const showAnalyticalQuality =
+    reportConfig.includeAnalyticalQualityReview ??
+    reportConfig.includeAnalyticalRecords;
+  const showSurveyAnalyticalLinks =
+    reportConfig.includeSurveyAnalyticalLinks ??
+    reportConfig.includeAnalyticalRecords;
+
+  const displayReportTitle =
+    reportConfig.reportTitle?.trim() ||
+    (reportConfig.reportType && REPORT_TYPE_PRESETS[reportConfig.reportType]
+      ? REPORT_TYPE_PRESETS[reportConfig.reportType].label
+      : reportConfig.mode === 'pre-experiment'
+        ? 'Pre-Experiment Planning Sheet'
+        : 'Post-Experiment Research Report');
+
+  const displayResearcher =
+    reportConfig.researcherName?.trim() ||
+    effectiveExperiment.researcher ||
+    '—';
+  const displayReportDate =
+    reportConfig.reportDate?.trim() ||
+    effectiveExperiment.experimentDate ||
+    '—';
 
   return (
     <div className="space-y-5">
       {/* Screen-only toolbar */}
       <div className="no-print space-y-4">
         <WorkspaceHeader
-          title="Lab Report (A4)"
-          description="Publication-grade A4 planning sheet and post-experiment research report bound directly to selected survey datasets, shared statistical analyses, saved figures, and researcher interpretations."
+          title="Lab Report Builder & Archive (A4)"
+          description="Publication-grade A4 research report builder with report-type presets, customizable sections, immutable snapshot-bound finalized report versions, and portable ZIP research packages."
           metadata={
             <>
               <span>
@@ -234,22 +591,122 @@ export function LabReportWorkspace({
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                Selected Survey Series:{' '}
-                <strong className="font-mono text-[#111827]">
-                  {selectedDatasets.map((d) => d.datasetId).join(', ') || 'None'}
+                Mode:{' '}
+                <strong className="text-[#111827]">
+                  {isViewingFinalized && activeFinalizedReport
+                    ? `Finalized v${activeFinalizedReport.versionNumber} (Locked Snapshot)`
+                    : 'Live Working Report'}
                 </strong>
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                Review Status:{' '}
-                <strong className="text-[#111827]">
-                  {experiment.scientificReviewStatus}
+                Finalized Versions:{' '}
+                <strong className="font-mono text-[#111827]">
+                  {finalizedReports.length}
                 </strong>
               </span>
             </>
           }
           actions={
             <>
+              <Button variant="secondary" onClick={handleExportZipPackage}>
+                <Package className="w-3.5 h-3.5" strokeWidth={1.75} />
+                Export Package (.zip)
+              </Button>
+              {onCreateFinalizedReport && (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setFinalizeTitle(
+                      `${displayReportTitle} — v${finalizedReports.length + 1}`
+                    );
+                    setShowFinalizeForm((prev) => !prev);
+                  }}
+                >
+                  <BookmarkCheck className="w-3.5 h-3.5" strokeWidth={1.75} />
+                  Finalize Version
+                </Button>
+              )}
+              <Button variant="primary" onClick={handlePrint}>
+                <Printer className="w-3.5 h-3.5" strokeWidth={1.75} />
+                Print / Save as PDF
+              </Button>
+            </>
+          }
+        />
+
+        {exportStatusMsg && (
+          <div className="px-3.5 py-2 rounded-[6px] bg-[#ECFDF5] border border-[#A7F3D0] text-[12px] text-[#065F46] flex items-center justify-between gap-2">
+            <span>{exportStatusMsg}</span>
+            <button
+              type="button"
+              onClick={() => setExportStatusMsg(null)}
+              className="text-[11px] underline cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Live vs. Finalized Report Version Switcher */}
+        <div className="bg-white border border-[#E5E7EB] rounded-[8px] p-3.5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-[#4B5563]">
+                Report View:
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedFinalizedId(null)}
+                className={`px-2.5 py-1 text-[12px] font-medium rounded-[5px] border cursor-pointer transition-colors ${
+                  !isViewingFinalized
+                    ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#0F52BA]'
+                    : 'bg-[#F8F9FA] border-[#E5E7EB] text-[#4B5563] hover:text-[#111827]'
+                }`}
+              >
+                Live Working Report
+              </button>
+              {finalizedReports.map((fr) => {
+                const selected = selectedFinalizedId === fr.id;
+                return (
+                  <div
+                    key={fr.id}
+                    className={`inline-flex items-center rounded-[5px] border ${
+                      selected
+                        ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#0F52BA]'
+                        : 'bg-[#F8F9FA] border-[#E5E7EB] text-[#4B5563]'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSelectedFinalizedId(fr.id)}
+                      className="px-2.5 py-1 text-[12px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Lock className="w-3 h-3" strokeWidth={1.75} />
+                      <span className="font-mono">v{fr.versionNumber}</span>
+                      <span className="truncate max-w-[160px]">{fr.title}</span>
+                    </button>
+                    {onDeleteFinalizedReport && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedFinalizedId === fr.id) {
+                            setSelectedFinalizedId(null);
+                          }
+                          onDeleteFinalizedReport(fr.id);
+                        }}
+                        aria-label={`Delete finalized report v${fr.versionNumber}`}
+                        className="px-1.5 py-1 border-l border-[#E5E7EB] text-[#6B7280] hover:text-[#B91C1C] cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" strokeWidth={1.75} />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {!isViewingFinalized && (
               <div
                 role="tablist"
                 aria-label="A4 report mode"
@@ -260,140 +717,468 @@ export function LabReportWorkspace({
                   role="tab"
                   aria-selected={reportConfig.mode === 'pre-experiment'}
                   onClick={() => handleModeChange('pre-experiment')}
-                  className={`px-3 py-1 text-[12px] font-medium rounded-[5px] transition-colors cursor-pointer ${
+                  className={`px-2.5 py-1 text-[11.5px] font-medium rounded-[5px] transition-colors cursor-pointer ${
                     reportConfig.mode === 'pre-experiment'
                       ? 'bg-white text-[#0F52BA] border border-[#E5E7EB]'
                       : 'text-[#4B5563] hover:text-[#111827] border border-transparent'
                   }`}
                 >
-                  Pre-Experiment Planning Sheet
+                  Planning Mode
                 </button>
                 <button
                   type="button"
                   role="tab"
                   aria-selected={reportConfig.mode === 'post-experiment'}
                   onClick={() => handleModeChange('post-experiment')}
-                  className={`px-3 py-1 text-[12px] font-medium rounded-[5px] transition-colors cursor-pointer ${
+                  className={`px-2.5 py-1 text-[11.5px] font-medium rounded-[5px] transition-colors cursor-pointer ${
                     reportConfig.mode === 'post-experiment'
                       ? 'bg-white text-[#0F52BA] border border-[#E5E7EB]'
                       : 'text-[#4B5563] hover:text-[#111827] border border-transparent'
                   }`}
                 >
-                  Post-Experiment Research Report
+                  Post-Experiment Mode
                 </button>
               </div>
-              <Button variant="primary" onClick={handlePrint}>
-                <Printer className="w-3.5 h-3.5" strokeWidth={1.75} />
-                Print / Save as PDF
-              </Button>
-            </>
-          }
-        />
-
-        {/* Report Section & Dataset / Figure Selection Controls */}
-        <div className="bg-white border border-[#E5E7EB] rounded-[8px] p-4 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[12px] text-[#4B5563]">
-              {[
-                { key: 'includeMaterialSnapshots', label: 'Materials' },
-                { key: 'includeBatchRecords', label: 'Batch Records' },
-                { key: 'includeSurveyOverview', label: 'Survey Overview' },
-                { key: 'includeSurveyTable', label: 'Survey Tables' },
-                { key: 'includeStatisticalSummaries', label: 'Stats & Replicates' },
-                { key: 'includeSurveyFigure', label: 'Figures' },
-                { key: 'includeComparativeSummary', label: 'Comparative Summary' },
-                { key: 'includeDataQualityLimitations', label: 'Data Quality & Limits' },
-                { key: 'includeResearchInterpretations', label: 'Interpretations' },
-                { key: 'includeAnalyticalRecords', label: 'Analytical' },
-                { key: 'includeRegressionSummary', label: 'OLS Regression' },
-                { key: 'includeScientificReferences', label: 'References' },
-                { key: 'includeObservations', label: 'Lab Log Notes' },
-                { key: 'includeBenchChecklist', label: 'Checklist' },
-              ].map((opt) => (
-                <label
-                  key={opt.key}
-                  className="inline-flex items-center gap-1.5 cursor-pointer select-none"
-                >
-                  <input
-                    type="checkbox"
-                    checked={Boolean(
-                      reportConfig[opt.key as keyof ReportConfiguration]
-                    )}
-                    onChange={(e) =>
-                      onUpdateReportConfig({ [opt.key]: e.target.checked })
-                    }
-                    className="accent-[#0F52BA]"
-                  />
-                  <span>{opt.label}</span>
-                </label>
-              ))}
-            </div>
-
-            <div className="w-full sm:w-64">
-              <input
-                type="text"
-                aria-label="Report institution header"
-                value={reportConfig.institutionHeader}
-                onChange={(e) =>
-                  onUpdateReportConfig({ institutionHeader: e.target.value })
-                }
-                placeholder="Institution / Laboratory Header"
-                className={inputBaseClass}
-              />
-            </div>
+            )}
           </div>
 
-          {/* Dataset & Saved Figure Selectors */}
-          {experiment.surveyDatasets.length > 0 && (
-            <div className="pt-3 border-t border-[#E5E7EB] grid grid-cols-1 md:grid-cols-2 gap-4 text-[12px]">
-              <div>
-                <div className="text-[10.5px] uppercase tracking-[0.05em] font-semibold text-[#4B5563] mb-1.5">
-                  Included Survey Datasets ({selectedDatasets.length} of{' '}
-                  {experiment.surveyDatasets.length})
+          {/* Locked Finalized Report Archival Banner */}
+          {isViewingFinalized && activeFinalizedReport && (
+            <div className="p-3 rounded-[6px] bg-[#F8F9FA] border border-[#D1D5DB] space-y-2 text-[12px]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[#111827]">
+                  <Lock className="w-3.5 h-3.5 text-[#0F52BA]" strokeWidth={1.75} />
+                  <strong>
+                    Archived Finalized Report v{activeFinalizedReport.versionNumber}
+                  </strong>
+                  <span className="font-mono text-[11px] text-[#4B5563]">
+                    Snapshot {activeFinalizedReport.snapshotId} ({activeFinalizedReport.snapshotName})
+                  </span>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  {experiment.surveyDatasets.map((ds) => {
-                    const checked = selectedDatasets.some((s) => s.id === ds.id);
-                    return (
-                      <label
-                        key={ds.id}
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[5px] border cursor-pointer ${
-                          checked
-                            ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#0F52BA]'
-                            : 'bg-[#F8F9FA] border-[#E5E7EB] text-[#4B5563]'
-                        }`}
+                <span className="font-mono text-[11px] text-[#6B7280]">
+                  Finalized {activeFinalizedReport.finalizedAt.slice(0, 16).replace('T', ' ')} by{' '}
+                  {activeFinalizedReport.researcher}
+                </span>
+              </div>
+              {activeFinalizedReport.notes && (
+                <p className="text-[#4B5563]">{activeFinalizedReport.notes}</p>
+              )}
+              {liveChangedSinceFinalized && (
+                <div className="p-2.5 rounded-[5px] bg-[#FFFBEB] border border-[#FDE68A] text-[#92400E] flex flex-wrap items-center justify-between gap-2 text-[11.5px]">
+                  <span className="inline-flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" strokeWidth={1.75} />
+                    <span>
+                      <strong>Newer Live Revision Available:</strong> The active experiment has been modified since snapshot{' '}
+                      <span className="font-mono">{activeFinalizedReport.snapshotId}</span>. This finalized report remains frozen at its archived snapshot.
+                    </span>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      onClick={() => setSelectedFinalizedId(null)}
+                    >
+                      View Live Report
+                    </Button>
+                    {onCreateFinalizedReport && (
+                      <Button
+                        variant="primary"
+                        onClick={() => {
+                          setSelectedFinalizedId(null);
+                          setFinalizeTitle(
+                            `${displayReportTitle} — v${finalizedReports.length + 1}`
+                          );
+                          setShowFinalizeForm(true);
+                        }}
                       >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleReportDataset(ds.id)}
-                          className="accent-[#0F52BA]"
-                        />
-                        <span className="font-mono font-medium">
-                          {ds.datasetId}
-                        </span>
-                        <span className="truncate max-w-[140px]">
-                          {ds.title}
-                        </span>
-                      </label>
-                    );
-                  })}
+                        Create New Finalized Revision
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Create Finalized Report Inline Form */}
+          {showFinalizeForm && onCreateFinalizedReport && (
+            <form
+              onSubmit={handleCreateFinalized}
+              className="p-3 rounded-[6px] bg-[#F8F9FA] border border-[#D1D5DB] space-y-3"
+            >
+              <div className="text-[12px] font-semibold text-[#111827]">
+                Finalize Report Version (Binds to Immutable Experiment Snapshot)
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-medium text-[#4B5563] mb-1">
+                    Finalized Report Title
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={finalizeTitle}
+                    onChange={(e) => setFinalizeTitle(e.target.value)}
+                    placeholder="e.g., Complete Research Report — v2"
+                    className={inputBaseClass}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-[#4B5563] mb-1">
+                    Snapshot Source
+                  </label>
+                  <select
+                    value={finalizeSnapshotChoice}
+                    onChange={(e) => setFinalizeSnapshotChoice(e.target.value)}
+                    className={inputBaseClass}
+                  >
+                    <option value="new">
+                      Capture New Immutable Snapshot Now
+                    </option>
+                    {snapshots.map((s) => (
+                      <option key={s.snapshotId} value={s.snapshotId}>
+                        Bind Existing: {s.snapshotId} — {s.name} (
+                        {s.capturedAt.slice(0, 10)})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-[#4B5563] mb-1">
+                    Archival Notes (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={finalizeNotes}
+                    onChange={(e) => setFinalizeNotes(e.target.value)}
+                    placeholder="Scope, milestone, or revision note"
+                    className={inputBaseClass}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setShowFinalizeForm(false)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" variant="primary">
+                  Save Finalized Report v{finalizedReports.length + 1}
+                </Button>
+              </div>
+            </form>
+          )}
+        </div>
+
+        {/* Report Presets, Metadata & Section Controls (Live Mode Only) */}
+        {!isViewingFinalized && (
+          <div className="bg-white border border-[#E5E7EB] rounded-[8px] p-4 space-y-4">
+            {/* 6 Report Type Presets */}
+            <div className="space-y-1.5">
+              <div className="text-[10.5px] uppercase tracking-[0.05em] font-semibold text-[#4B5563]">
+                Report Type Presets
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+                {REPORT_TYPE_KEYS.map((key) => {
+                  const preset = REPORT_TYPE_PRESETS[key];
+                  const active =
+                    (reportConfig.reportType ?? 'complete-research') === key;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => handleApplyPreset(key)}
+                      title={preset.description}
+                      className={`text-left px-2.5 py-2 rounded-[6px] border transition-colors cursor-pointer ${
+                        active
+                          ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#0F52BA]'
+                          : 'bg-[#F8F9FA] border-[#E5E7EB] text-[#374151] hover:border-[#D1D5DB]'
+                      }`}
+                    >
+                      <div className="text-[11.5px] font-semibold leading-snug">
+                        {preset.label}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Metadata & Cover Controls */}
+            <div className="pt-3 border-t border-[#E5E7EB] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-[12px]">
+              <div>
+                <label className="block text-[10.5px] uppercase tracking-[0.04em] font-semibold text-[#4B5563] mb-1">
+                  Report Title
+                </label>
+                <input
+                  type="text"
+                  value={reportConfig.reportTitle ?? ''}
+                  onChange={(e) =>
+                    onUpdateReportConfig({ reportTitle: e.target.value })
+                  }
+                  placeholder={displayReportTitle}
+                  className={inputBaseClass}
+                />
+              </div>
+              <div>
+                <label className="block text-[10.5px] uppercase tracking-[0.04em] font-semibold text-[#4B5563] mb-1">
+                  Subtitle
+                </label>
+                <input
+                  type="text"
+                  value={reportConfig.reportSubtitle ?? ''}
+                  onChange={(e) =>
+                    onUpdateReportConfig({ reportSubtitle: e.target.value })
+                  }
+                  placeholder="Optional report subtitle"
+                  className={inputBaseClass}
+                />
+              </div>
+              <div>
+                <label className="block text-[10.5px] uppercase tracking-[0.04em] font-semibold text-[#4B5563] mb-1">
+                  Researcher Name
+                </label>
+                <input
+                  type="text"
+                  value={reportConfig.researcherName ?? ''}
+                  onChange={(e) =>
+                    onUpdateReportConfig({ researcherName: e.target.value })
+                  }
+                  placeholder={experiment.researcher || 'Researcher'}
+                  className={inputBaseClass}
+                />
+              </div>
+              <div>
+                <label className="block text-[10.5px] uppercase tracking-[0.04em] font-semibold text-[#4B5563] mb-1">
+                  Report Date
+                </label>
+                <input
+                  type="date"
+                  value={reportConfig.reportDate ?? ''}
+                  onChange={(e) =>
+                    onUpdateReportConfig({ reportDate: e.target.value })
+                  }
+                  className={inputBaseClass}
+                />
+              </div>
+              <div>
+                <label className="block text-[10.5px] uppercase tracking-[0.04em] font-semibold text-[#4B5563] mb-1">
+                  Institution Header
+                </label>
+                <input
+                  type="text"
+                  aria-label="Report institution header"
+                  value={reportConfig.institutionHeader}
+                  onChange={(e) =>
+                    onUpdateReportConfig({ institutionHeader: e.target.value })
+                  }
+                  placeholder="Institution / Laboratory Header"
+                  className={inputBaseClass}
+                />
+              </div>
+            </div>
+
+            {/* Section Toggles + Cover/Order Controls */}
+            <div className="pt-3 border-t border-[#E5E7EB] space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[10.5px] uppercase tracking-[0.05em] font-semibold text-[#4B5563]">
+                  Included Sections &amp; Print Layout
+                </span>
+                <div className="flex items-center gap-3 text-[12px] text-[#4B5563]">
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(reportConfig.includeCoverPage)}
+                      onChange={(e) =>
+                        onUpdateReportConfig({
+                          includeCoverPage: e.target.checked,
+                        })
+                      }
+                      className="accent-[#0F52BA]"
+                    />
+                    <span>Cover Page</span>
+                  </label>
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={reportConfig.includePageNumbers !== false}
+                      onChange={(e) =>
+                        onUpdateReportConfig({
+                          includePageNumbers: e.target.checked,
+                        })
+                      }
+                      className="accent-[#0F52BA]"
+                    />
+                    <span>Footer Metadata</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowSectionOrder((prev) => !prev)}
+                    className="text-[11.5px] font-medium text-[#0F52BA] hover:underline cursor-pointer"
+                  >
+                    {showSectionOrder ? 'Hide Section Order' : 'Reorder Sections'}
+                  </button>
                 </div>
               </div>
 
-              {availableSavedFigures.length > 0 && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[12px] text-[#4B5563]">
+                {[
+                  { key: 'includeMaterialSnapshots', label: 'Materials' },
+                  { key: 'includeBatchRecords', label: 'Batch Records' },
+                  { key: 'includePlannedVsActual', label: 'Research Plan & Deviations' },
+                  { key: 'includeSampleRegistry', label: 'Sample Registry' },
+                  { key: 'includeResearchTimeline', label: 'Research Timeline' },
+                  { key: 'includeSurveyOverview', label: 'Survey Overview' },
+                  { key: 'includeSurveyTable', label: 'Survey Tables' },
+                  { key: 'includeStatisticalSummaries', label: 'Stats & Replicates' },
+                  { key: 'includeSurveyFigure', label: 'Survey Figures' },
+                  { key: 'includeComparativeSummary', label: 'Comparative Summary' },
+                  { key: 'includeDataQualityLimitations', label: 'Survey Quality' },
+                  { key: 'includeResearchInterpretations', label: 'Interpretations' },
+                  { key: 'includeAnalyticalOverview', label: 'Analytical Overview' },
+                  { key: 'includeCalibrationRecords', label: 'Calibration & OLS' },
+                  { key: 'includeAnalyticalFigures', label: 'Analytical Figures' },
+                  { key: 'includeAnalyticalRecords', label: 'Analytical Samples' },
+                  { key: 'includeDilutionRecords', label: 'Dilution Records' },
+                  { key: 'includeAnalyticalQualityReview', label: 'Analytical Quality' },
+                  { key: 'includeSurveyAnalyticalLinks', label: 'Survey–Analytical Links' },
+                  { key: 'includeScientificReferences', label: 'References' },
+                  { key: 'includeObservations', label: 'Lab Log Notes' },
+                  { key: 'includeBenchChecklist', label: 'Milestones / Checklist' },
+                  { key: 'includeSnapshotMetadata', label: 'Provenance Block' },
+                ].map((opt) => {
+                  const rawVal =
+                    reportConfig[opt.key as keyof ReportConfiguration];
+                  const checked =
+                    typeof rawVal === 'boolean'
+                      ? rawVal
+                      : opt.key === 'includeAnalyticalOverview' ||
+                          opt.key === 'includeDilutionRecords' ||
+                          opt.key === 'includeAnalyticalQualityReview' ||
+                          opt.key === 'includeSurveyAnalyticalLinks'
+                        ? reportConfig.includeAnalyticalRecords
+                        : opt.key === 'includeCalibrationRecords' ||
+                            opt.key === 'includeAnalyticalFigures'
+                          ? reportConfig.includeRegressionSummary
+                          : false;
+                  return (
+                    <label
+                      key={opt.key}
+                      className="inline-flex items-center gap-1.5 cursor-pointer select-none"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const patch: Partial<ReportConfiguration> = {
+                            [opt.key]: e.target.checked,
+                          };
+                          if (opt.key === 'includeCalibrationRecords') {
+                            patch.includeRegressionSummary = e.target.checked;
+                          }
+                          onUpdateReportConfig(patch);
+                        }}
+                        className="accent-[#0F52BA]"
+                      />
+                      <span>{opt.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+
+              {showSectionOrder && (
+                <div className="p-3 rounded-[6px] bg-[#F8F9FA] border border-[#E5E7EB] space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold uppercase tracking-[0.04em] text-[#4B5563]">
+                      A4 Section Ordering
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateReportConfig({
+                          sectionOrder: [...DEFAULT_REPORT_SECTION_ORDER],
+                        })
+                      }
+                      className="inline-flex items-center gap-1 text-[11px] text-[#4B5563] hover:text-[#111827] cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" strokeWidth={1.75} />
+                      Reset Default
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 text-[11.5px]">
+                    {activeSectionOrder.map((secId, idx) => (
+                      <div
+                        key={secId}
+                        className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-white border border-[#E5E7EB] rounded-[5px]"
+                      >
+                        <span className="truncate">
+                          <span className="font-mono text-[#6B7280] mr-1.5">
+                            {idx + 1}.
+                          </span>
+                          {REPORT_SECTION_LABELS[secId]}
+                        </span>
+                        <div className="inline-flex items-center gap-0.5 shrink-0">
+                          <button
+                            type="button"
+                            disabled={idx === 0}
+                            onClick={() => moveSection(idx, -1)}
+                            aria-label={`Move ${REPORT_SECTION_LABELS[secId]} up`}
+                            className="p-0.5 text-[#4B5563] hover:text-[#111827] disabled:opacity-30 cursor-pointer"
+                          >
+                            <ArrowUp className="w-3.5 h-3.5" strokeWidth={1.75} />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={idx === activeSectionOrder.length - 1}
+                            onClick={() => moveSection(idx, 1)}
+                            aria-label={`Move ${REPORT_SECTION_LABELS[secId]} down`}
+                            className="p-0.5 text-[#4B5563] hover:text-[#111827] disabled:opacity-30 cursor-pointer"
+                          >
+                            <ArrowDown className="w-3.5 h-3.5" strokeWidth={1.75} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Researcher Conclusions Input */}
+              <div className="pt-2">
+                <label className="block text-[10.5px] uppercase tracking-[0.04em] font-semibold text-[#4B5563] mb-1">
+                  Researcher Conclusions &amp; Summary Note (Optional)
+                </label>
+                <textarea
+                  rows={2}
+                  value={reportConfig.researcherConclusions ?? ''}
+                  onChange={(e) =>
+                    onUpdateReportConfig({
+                      researcherConclusions: e.target.value,
+                    })
+                  }
+                  placeholder="Enter researcher-authored conclusions or next-step recommendations to include in the printed report..."
+                  className={inputBaseClass}
+                />
+              </div>
+            </div>
+
+            {/* Dataset & Saved Figure Selectors */}
+            {effectiveExperiment.surveyDatasets.length > 0 && (
+              <div className="pt-3 border-t border-[#E5E7EB] grid grid-cols-1 md:grid-cols-2 gap-4 text-[12px]">
                 <div>
                   <div className="text-[10.5px] uppercase tracking-[0.05em] font-semibold text-[#4B5563] mb-1.5">
-                    Additional Saved Figures to Embed
+                    Included Survey Datasets ({selectedDatasets.length} of{' '}
+                    {effectiveExperiment.surveyDatasets.length})
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {availableSavedFigures.map(({ dataset, figure }) => {
-                      const checked = (
-                        reportConfig.selectedFigureIds ?? []
-                      ).includes(figure.id);
+                    {effectiveExperiment.surveyDatasets.map((ds) => {
+                      const checked = selectedDatasets.some(
+                        (s) => s.id === ds.id
+                      );
                       return (
                         <label
-                          key={figure.id}
+                          key={ds.id}
                           className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[5px] border cursor-pointer ${
                             checked
                               ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#0F52BA]'
@@ -403,24 +1188,147 @@ export function LabReportWorkspace({
                           <input
                             type="checkbox"
                             checked={checked}
-                            onChange={() => toggleReportFigure(figure.id)}
+                            onChange={() => toggleReportDataset(ds.id)}
                             className="accent-[#0F52BA]"
                           />
-                          <span className="font-mono text-[11px]">
-                            {dataset.datasetId}:
+                          <span className="font-mono font-medium">
+                            {ds.datasetId}
                           </span>
-                          <span className="truncate max-w-[150px]">
-                            {figure.name}
+                          <span className="truncate max-w-[140px]">
+                            {ds.title}
                           </span>
                         </label>
                       );
                     })}
                   </div>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
+
+                {availableSavedFigures.length > 0 && (
+                  <div>
+                    <div className="text-[10.5px] uppercase tracking-[0.05em] font-semibold text-[#4B5563] mb-1.5">
+                      Additional Saved Figures to Embed
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {availableSavedFigures.map(({ dataset, figure }) => {
+                        const checked = (
+                          reportConfig.selectedFigureIds ?? []
+                        ).includes(figure.id);
+                        return (
+                          <label
+                            key={figure.id}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[5px] border cursor-pointer ${
+                              checked
+                                ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#0F52BA]'
+                                : 'bg-[#F8F9FA] border-[#E5E7EB] text-[#4B5563]'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleReportFigure(figure.id)}
+                              className="accent-[#0F52BA]"
+                            />
+                            <span className="font-mono text-[11px]">
+                              {dataset.datasetId}:
+                            </span>
+                            <span className="truncate max-w-[150px]">
+                              {figure.name}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Analytical Session & Saved Analytical Figure Selectors */}
+            {(effectiveExperiment.analyticalSessions ?? []).length > 0 && (
+              <div className="pt-3 border-t border-[#E5E7EB] grid grid-cols-1 md:grid-cols-2 gap-4 text-[12px]">
+                <div>
+                  <div className="text-[10.5px] uppercase tracking-[0.05em] font-semibold text-[#4B5563] mb-1.5">
+                    Included Analytical Sessions (
+                    {selectedAnalyticalSessions.length} of{' '}
+                    {effectiveExperiment.analyticalSessions.length})
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {effectiveExperiment.analyticalSessions.map((session) => {
+                      const checked = selectedAnalyticalSessions.some(
+                        (s) => s.id === session.id
+                      );
+                      return (
+                        <label
+                          key={session.id}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[5px] border cursor-pointer ${
+                            checked
+                              ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#0F52BA]'
+                              : 'bg-[#F8F9FA] border-[#E5E7EB] text-[#4B5563]'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleAnalyticalSession(session.id)}
+                            className="accent-[#0F52BA]"
+                          />
+                          <span className="font-mono font-medium">
+                            {session.sessionId}
+                          </span>
+                          <span className="truncate max-w-[150px]">
+                            {session.technique} · {session.title}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {availableSavedAnalyticalFigures.length > 0 && (
+                  <div>
+                    <div className="text-[10.5px] uppercase tracking-[0.05em] font-semibold text-[#4B5563] mb-1.5">
+                      Additional Saved Analytical Figures
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {availableSavedAnalyticalFigures.map(
+                        ({ session, figure }) => {
+                          const checked = (
+                            reportConfig.selectedAnalyticalFigureIds ?? []
+                          ).includes(figure.id);
+                          return (
+                            <label
+                              key={figure.id}
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[5px] border cursor-pointer ${
+                                checked
+                                  ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#0F52BA]'
+                                  : 'bg-[#F8F9FA] border-[#E5E7EB] text-[#4B5563]'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() =>
+                                  toggleAnalyticalFigure(figure.id)
+                                }
+                                className="accent-[#0F52BA]"
+                              />
+                              <span className="font-mono text-[11px]">
+                                {session.sessionId}:
+                              </span>
+                              <span className="truncate max-w-[150px]">
+                                {figure.name}
+                              </span>
+                            </label>
+                          );
+                        }
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* A4 Document Sheet */}
@@ -428,6 +1336,46 @@ export function LabReportWorkspace({
         aria-label="A4 Laboratory Report Preview"
         className="print-sheet mx-auto bg-white border border-[#D1D5DB] rounded-[2px] w-full max-w-[210mm] min-h-[297mm] p-8 sm:p-10 text-[#111827] space-y-6"
       >
+        {/* Optional Cover Page Header Block */}
+        {reportConfig.includeCoverPage && (
+          <section className="pb-6 border-b-2 border-[#111827] space-y-3 print-avoid-break">
+            <div className="text-[11px] uppercase tracking-[0.1em] font-semibold text-[#0F52BA]">
+              {reportConfig.institutionHeader || 'SEA Workbench Laboratory Dossier'}
+            </div>
+            <h1 className="text-[22px] font-semibold text-[#111827] leading-tight">
+              {displayReportTitle}
+            </h1>
+            {reportConfig.reportSubtitle && (
+              <p className="text-[13px] text-[#4B5563]">
+                {reportConfig.reportSubtitle}
+              </p>
+            )}
+            <div className="text-[14px] font-medium text-[#111827]">
+              {effectiveExperiment.title}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-[#E5E7EB] text-[11.5px]">
+              <div>
+                <div className="text-[10px] uppercase text-[#6B7280]">Experiment ID</div>
+                <div className="font-mono font-semibold text-[#0F52BA]">
+                  {effectiveExperiment.experimentId}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-[#6B7280]">Researcher</div>
+                <div className="font-medium">{displayResearcher}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-[#6B7280]">Date</div>
+                <div className="font-mono">{displayReportDate}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-[#6B7280]">Record Status</div>
+                <div className="font-medium">{effectiveExperiment.status}</div>
+              </div>
+            </div>
+          </section>
+        )}
+
         {/* Document Header */}
         <header className="pb-4 border-b-2 border-[#111827] flex items-start justify-between gap-6">
           <div>
@@ -440,31 +1388,44 @@ export function LabReportWorkspace({
                 : `SEA Workbench · ${reportConfig.institutionHeader || 'Laboratory Record'}`}
             </div>
             <h2 className="text-[18px] font-semibold text-[#111827] mt-1 leading-tight">
-              {reportConfig.mode === 'pre-experiment'
-                ? 'Pre-Experiment Planning Sheet'
-                : 'Post-Experiment Research Report'}
+              {displayReportTitle}
             </h2>
+            {reportConfig.reportSubtitle && (
+              <p className="text-[12px] text-[#4B5563] mt-0.5">
+                {reportConfig.reportSubtitle}
+              </p>
+            )}
             <p className="text-[13.5px] font-medium text-[#111827] mt-1.5">
-              {experiment.title}
+              {effectiveExperiment.title}
             </p>
           </div>
           <div className="text-right font-mono tabular-nums text-[11.5px] text-[#4B5563] shrink-0 space-y-0.5">
             <div className="text-[13px] font-semibold text-[#0F52BA]">
-              {experiment.experimentId}
+              {effectiveExperiment.experimentId}
             </div>
-            <div>Type: {experiment.type}</div>
-            <div>Status: {experiment.status}</div>
-            <div>Generated: {generatedAt}</div>
+            <div>Type: {effectiveExperiment.type}</div>
+            <div>Status: {effectiveExperiment.status}</div>
+            {activeFinalizedReport ? (
+              <div className="text-[#0F52BA] font-semibold">
+                Finalized v{activeFinalizedReport.versionNumber} ·{' '}
+                {activeFinalizedReport.snapshotId}
+              </div>
+            ) : (
+              <div>Generated: {generatedAt}</div>
+            )}
           </div>
         </header>
 
         {/* Demonstration / Review Status Banner */}
-        {(experiment.isDemonstration ||
-          experiment.scientificReviewStatus !== 'Reviewed') && (
+        {(effectiveExperiment.isDemonstration ||
+          effectiveExperiment.scientificReviewStatus !== 'Reviewed') && (
           <div className="p-2.5 bg-[#FFFBEB] border border-[#FDE68A] text-[11.5px] text-[#92400E] print-avoid-break">
             <strong>Scientific Review &amp; Provenance Notice:</strong> Review Status:{' '}
-            <span className="font-mono">{experiment.scientificReviewStatus}</span>.{' '}
-            {experiment.isDemonstration
+            <span className="font-mono">
+              {effectiveExperiment.scientificReviewStatus}
+            </span>
+            .{' '}
+            {effectiveExperiment.isDemonstration
               ? 'This document contains synthetic demonstration fixtures and must not be interpreted as validated experimental evidence.'
               : 'Descriptive statistics and exploratory OLS regression are computed deterministically for inspection; SEA stoichiometric models, isotherm fits, and analytical method validation remain pending independent scientific review.'}
           </div>
@@ -476,14 +1437,14 @@ export function LabReportWorkspace({
             <div className="text-[10.5px] uppercase tracking-[0.05em] text-[#6B7280]">
               Researcher
             </div>
-            <div className="font-medium mt-0.5">{experiment.researcher || '—'}</div>
+            <div className="font-medium mt-0.5">{displayResearcher}</div>
           </div>
           <div>
             <div className="text-[10.5px] uppercase tracking-[0.05em] text-[#6B7280]">
-              Experiment Date
+              Experiment / Report Date
             </div>
             <div className="font-mono tabular-nums mt-0.5">
-              {experiment.experimentDate || '—'}
+              {displayReportDate}
             </div>
           </div>
           <div>
@@ -499,7 +1460,7 @@ export function LabReportWorkspace({
               Record Version
             </div>
             <div className="font-mono tabular-nums mt-0.5">
-              v{experiment.dataVersion} · App {APP_VERSION}
+              v{effectiveExperiment.dataVersion} · App {APP_VERSION}
             </div>
           </div>
         </section>
@@ -510,7 +1471,7 @@ export function LabReportWorkspace({
             1. Research Objective
           </h3>
           <p className="text-[12.5px] text-[#111827] leading-relaxed">
-            {experiment.objective || 'No research objective recorded.'}
+            {effectiveExperiment.objective || 'No research objective recorded.'}
           </p>
         </section>
 
@@ -533,14 +1494,20 @@ export function LabReportWorkspace({
                       {supportSnap.supplierOrGrade || '—'}
                     </div>
                     <div className="font-mono tabular-nums text-[11px] text-[#4B5563]">
-                      BET: {formatScientificNumber(supportSnap.betSurfaceArea.value, 1)}{' '}
+                      BET:{' '}
+                      {formatScientificNumber(supportSnap.betSurfaceArea.value, 1)}{' '}
                       {supportSnap.betSurfaceArea.unit} · PZC:{' '}
                       {formatScientificNumber(supportSnap.pzc.value, 2)}{' '}
                       {supportSnap.pzc.unit}
                     </div>
                     <div className="text-[11px] text-[#6B7280]">
-                      Verification: {VERIFICATION_LABELS[supportSnap.verificationStatus]} ·
-                      Snapshot: {experiment.batch.supportSnapshot?.capturedAt.slice(0, 10)}
+                      Verification:{' '}
+                      {VERIFICATION_LABELS[supportSnap.verificationStatus]} ·
+                      Snapshot:{' '}
+                      {effectiveExperiment.batch.supportSnapshot?.capturedAt.slice(
+                        0,
+                        10
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -560,7 +1527,8 @@ export function LabReportWorkspace({
                       {precursorSnap.chargeClassification}
                     </div>
                     <div className="font-mono tabular-nums text-[11px] text-[#4B5563]">
-                      MW: {formatScientificNumber(precursorSnap.molarMass.value, 2)}{' '}
+                      MW:{' '}
+                      {formatScientificNumber(precursorSnap.molarMass.value, 2)}{' '}
                       {precursorSnap.molarMass.unit} · Metal wt%:{' '}
                       {formatScientificNumber(
                         precursorSnap.metalWeightFraction.value,
@@ -571,7 +1539,11 @@ export function LabReportWorkspace({
                     <div className="text-[11px] text-[#6B7280]">
                       Verification:{' '}
                       {VERIFICATION_LABELS[precursorSnap.verificationStatus]} ·
-                      Snapshot: {experiment.batch.precursorSnapshot?.capturedAt.slice(0, 10)}
+                      Snapshot:{' '}
+                      {effectiveExperiment.batch.precursorSnapshot?.capturedAt.slice(
+                        0,
+                        10
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -610,50 +1582,52 @@ export function LabReportWorkspace({
                 {[
                   {
                     name: 'Support Mass',
-                    planned: experiment.batch.plannedSupportMassG,
-                    actual: experiment.batch.actualSupportMassG,
+                    planned: effectiveExperiment.batch.plannedSupportMassG,
+                    actual: effectiveExperiment.batch.actualSupportMassG,
                     unit: 'g',
                     d: 3,
                   },
                   {
                     name: 'Solution Volume',
-                    planned: experiment.batch.plannedSolutionVolumeMl,
-                    actual: experiment.batch.actualSolutionVolumeMl,
+                    planned: effectiveExperiment.batch.plannedSolutionVolumeMl,
+                    actual: effectiveExperiment.batch.actualSolutionVolumeMl,
                     unit: 'mL',
                     d: 2,
                   },
                   {
                     name: 'Surface Loading (SL)',
-                    planned: experiment.batch.plannedSurfaceLoadingM2L,
-                    actual: experiment.batch.actualSurfaceLoadingM2L,
+                    planned: effectiveExperiment.batch.plannedSurfaceLoadingM2L,
+                    actual: effectiveExperiment.batch.actualSurfaceLoadingM2L,
                     unit: 'm²/L',
                     d: 1,
                   },
                   {
                     name: 'Metal Loading',
-                    planned: experiment.batch.plannedTargetMetalLoadingWtPct,
-                    actual: experiment.batch.actualMeasuredMetalLoadingWtPct,
+                    planned:
+                      effectiveExperiment.batch.plannedTargetMetalLoadingWtPct,
+                    actual:
+                      effectiveExperiment.batch.actualMeasuredMetalLoadingWtPct,
                     unit: 'wt%',
                     d: 2,
                   },
                   {
                     name: 'Initial pH',
-                    planned: experiment.batch.plannedInitialPh,
-                    actual: experiment.batch.actualInitialPh,
+                    planned: effectiveExperiment.batch.plannedInitialPh,
+                    actual: effectiveExperiment.batch.actualInitialPh,
                     unit: 'pH',
                     d: 2,
                   },
                   {
                     name: 'Final pH',
                     planned: null,
-                    actual: experiment.batch.actualFinalPh,
+                    actual: effectiveExperiment.batch.actualFinalPh,
                     unit: 'pH',
                     d: 2,
                   },
                   {
                     name: 'Precursor Concentration',
-                    planned: experiment.batch.plannedPrecursorConcPpm,
-                    actual: experiment.batch.actualPrecursorConcPpm,
+                    planned: effectiveExperiment.batch.plannedPrecursorConcPpm,
+                    actual: effectiveExperiment.batch.actualPrecursorConcPpm,
                     unit: 'ppm',
                     d: 1,
                   },
@@ -674,7 +1648,9 @@ export function LabReportWorkspace({
                     <td className="py-1.5 px-2.5 text-[#4B5563]">
                       {r.planned === null && r.actual === null
                         ? 'Unavailable'
-                        : PROVENANCE_LABELS[experiment.batch.dataProvenance]}
+                        : PROVENANCE_LABELS[
+                            effectiveExperiment.batch.dataProvenance
+                          ]}
                     </td>
                   </tr>
                 ))}
@@ -688,6 +1664,90 @@ export function LabReportWorkspace({
             </div>
           </section>
         )}
+
+        {/* Phase 5 Research Plan & Deviations */}
+        {reportConfig.includePlannedVsActual &&
+          effectiveExperiment.researchPlan &&
+          ((effectiveExperiment.researchPlan.researchQuestions ?? []).length >
+            0 ||
+            (effectiveExperiment.researchPlan.plannedSampleIds ?? []).length >
+              0 ||
+            Boolean(
+              effectiveExperiment.researchPlan.plannedMeasurementRequirements
+            ) ||
+            (effectiveExperiment.researchPlan.deviations ?? []).length > 0) && (
+            <section className="print-avoid-break space-y-2 pt-2 border-t border-[#D1D5DB]">
+              <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
+                3b. Research Plan, Scope &amp; Recorded Deviations
+              </h3>
+              <div className="border border-[#E5E7EB] p-3 text-[11px] space-y-2 bg-[#F8F9FA]">
+                {(effectiveExperiment.researchPlan.researchQuestions ?? [])
+                  .length > 0 && (
+                  <div>
+                    <div className="font-semibold text-[#111827] mb-0.5">
+                      Research Questions / Hypotheses
+                    </div>
+                    <ul className="list-disc pl-4 space-y-0.5 text-[#374151]">
+                      {effectiveExperiment.researchPlan.researchQuestions.map(
+                        (q, i) => (
+                          <li key={i}>{q}</li>
+                        )
+                      )}
+                    </ul>
+                  </div>
+                )}
+                {(effectiveExperiment.researchPlan.plannedSampleIds ?? [])
+                  .length > 0 && (
+                  <div>
+                    <span className="font-semibold text-[#111827]">
+                      Planned Sample IDs:{' '}
+                    </span>
+                    <span className="font-mono text-[#374151]">
+                      {effectiveExperiment.researchPlan.plannedSampleIds.join(
+                        ', '
+                      )}
+                    </span>
+                  </div>
+                )}
+                {effectiveExperiment.researchPlan
+                  .plannedMeasurementRequirements && (
+                  <div>
+                    <span className="font-semibold text-[#111827]">
+                      Measurement Requirements:{' '}
+                    </span>
+                    <span className="text-[#374151]">
+                      {
+                        effectiveExperiment.researchPlan
+                          .plannedMeasurementRequirements
+                      }
+                    </span>
+                  </div>
+                )}
+                {(effectiveExperiment.researchPlan.deviations ?? []).length >
+                  0 && (
+                  <div className="pt-1 border-t border-[#E5E7EB]">
+                    <div className="font-semibold text-[#92400E] mb-0.5">
+                      Recorded Deviations from Plan (
+                      {effectiveExperiment.researchPlan.deviations.length})
+                    </div>
+                    <ul className="list-disc pl-4 space-y-0.5 text-[#374151]">
+                      {effectiveExperiment.researchPlan.deviations.map(
+                        (dev) => (
+                          <li key={dev.id}>
+                            <span className="font-mono text-[10px] text-[#6B7280]">
+                              [{dev.timestamp.slice(0, 10)}]
+                            </span>{' '}
+                            <strong>{dev.description}</strong>
+                            {dev.reason ? ` — Reason: ${dev.reason}` : ''}
+                          </li>
+                        )
+                      )}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
 
         {/* Selected Survey Datasets (Overview, Tables, Stats, Figures, Quality & Interpretations) */}
         {datasetReports.map(({ dataset, analysis, completeness }, dsIndex) => (
@@ -910,7 +1970,7 @@ export function LabReportWorkspace({
                   <ScientificFigureCanvas
                     dataset={dataset}
                     figureConfig={dataset.figureConfig}
-                    experimentId={experiment.experimentId}
+                    experimentId={effectiveExperiment.experimentId}
                     referencePzcMarkers={dataset.referencePzcMarkers}
                     height={235}
                     compact
@@ -925,7 +1985,7 @@ export function LabReportWorkspace({
                         <ScientificFigureCanvas
                           dataset={dataset}
                           figureConfig={savedFig}
-                          experimentId={experiment.experimentId}
+                          experimentId={effectiveExperiment.experimentId}
                           referencePzcMarkers={dataset.referencePzcMarkers}
                           height={230}
                           compact
@@ -1058,149 +2118,549 @@ export function LabReportWorkspace({
             </section>
           )}
 
-        {/* Analytical Summary */}
-        {reportConfig.includeAnalyticalRecords &&
-          reportConfig.mode === 'post-experiment' && (
-            <section className="space-y-2 print-avoid-break pt-2 border-t border-[#D1D5DB]">
+        {/* Phase 4 Multi-Session Analytical Chemistry Sections */}
+        {reportConfig.mode === 'post-experiment' &&
+          (showAnalyticalOverview ||
+            showCalibrationRecords ||
+            showAnalyticalFigures ||
+            reportConfig.includeAnalyticalRecords ||
+            showDilutionRecords ||
+            showAnalyticalQuality ||
+            showSurveyAnalyticalLinks) && (
+            <div className="space-y-4 pt-2 border-t border-[#D1D5DB]">
               <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
-                6. Analytical Records ({experiment.analyticalConfig.instrumentType} ·{' '}
-                {experiment.analyticalConfig.analyteElement || 'Analyte Unspecified'})
+                6. Analytical Chemistry &amp; Instrument Data Sessions (
+                {analyticalSessionReports.length} Selected)
               </h3>
-              {experiment.instrumentMeasurements.length === 0 ? (
+
+              {analyticalSessionReports.length === 0 ? (
                 <p className="text-[12px] text-[#6B7280]">
-                  No analytical instrument sample records logged.
+                  No analytical sessions selected for this report.
                 </p>
               ) : (
-                <table className="w-full text-left border-collapse text-[10.5px] border border-[#D1D5DB]">
-                  <thead>
-                    <tr className="bg-[#F3F4F6] border-b border-[#D1D5DB] text-[9.5px] uppercase tracking-[0.04em] text-[#4B5563]">
-                      <th className="py-1.5 px-2 font-medium">Sample ID</th>
-                      <th className="py-1.5 px-2 font-medium">Stage</th>
-                      <th className="py-1.5 px-2 font-medium">Rep</th>
-                      <th className="py-1.5 px-2 font-medium text-right">
-                        Dilution (×)
-                      </th>
-                      <th className="py-1.5 px-2 font-medium text-right">
-                        Raw Signal
-                      </th>
-                      <th className="py-1.5 px-2 font-medium text-right">
-                        Reported Conc.
-                      </th>
-                      <th className="py-1.5 px-2 font-medium">Provenance</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#E5E7EB]">
-                    {experiment.instrumentMeasurements.map((m) => (
-                      <tr key={m.id}>
-                        <td className="py-1 px-2 font-mono font-medium">
-                          {m.sampleId}
-                        </td>
-                        <td className="py-1 px-2">{m.stage}</td>
-                        <td className="py-1 px-2 font-mono">{m.replicateId}</td>
-                        <td className="py-1 px-2 text-right font-mono tabular-nums">
-                          {formatScientificNumber(m.dilutionFactor, 1)}
-                        </td>
-                        <td className="py-1 px-2 text-right font-mono tabular-nums">
-                          {formatScientificNumber(m.rawSignal, 1)} {m.signalUnit}
-                        </td>
-                        <td className="py-1 px-2 text-right font-mono tabular-nums">
-                          {formatScientificNumber(m.reportedConc, 2)} {m.concUnit}
-                        </td>
-                        <td className="py-1 px-2 text-[#4B5563]">
-                          {PROVENANCE_LABELS[m.provenance]}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </section>
-          )}
+                analyticalSessionReports.map(
+                  (
+                    {
+                      session,
+                      activeCal,
+                      activeCalAnalysis,
+                      calAnalyses,
+                      dilutionDiagnostics,
+                      qualityIssues,
+                      reviewMap,
+                    },
+                    sIdx
+                  ) => (
+                    <div
+                      key={session.id}
+                      className="space-y-3 pt-2 border-t border-[#E5E7EB]"
+                    >
+                      {/* 6.x Overview & Metadata */}
+                      {showAnalyticalOverview && (
+                        <section className="print-avoid-break space-y-1.5">
+                          <h4 className="text-[11px] uppercase tracking-[0.06em] font-semibold text-[#111827]">
+                            6.{sIdx + 1} Session {session.sessionId} —{' '}
+                            {session.title}
+                          </h4>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] border border-[#E5E7EB] p-2.5 bg-[#F8F9FA]">
+                            <div>
+                              <span className="text-[#6B7280]">Technique: </span>
+                              <strong>
+                                {session.technique === 'Other' &&
+                                session.customTechniqueName
+                                  ? session.customTechniqueName
+                                  : session.technique}
+                              </strong>
+                            </div>
+                            <div>
+                              <span className="text-[#6B7280]">Instrument: </span>
+                              <span className="font-mono">
+                                {[
+                                  session.instrumentManufacturer,
+                                  session.instrumentModel,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' ') || '—'}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-[#6B7280]">
+                                Analyst / Date:{' '}
+                              </span>
+                              <span className="font-mono">
+                                {session.analyst || '—'} ·{' '}
+                                {session.analysisDate || '—'}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-[#6B7280]">
+                                Provenance:{' '}
+                              </span>
+                              <strong>
+                                {PROVENANCE_LABELS[session.provenance]}
+                              </strong>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="text-[#6B7280]">Matrix: </span>
+                              <span>{session.matrixDescription || '—'}</span>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="text-[#6B7280]">
+                                Method / Analytes:{' '}
+                              </span>
+                              <span className="font-mono">
+                                {session.methodReference || '—'} ·{' '}
+                                {session.analytes
+                                  .map(
+                                    (a) =>
+                                      `${a.symbol}${
+                                        a.wavelengthNm !== null
+                                          ? ` (${a.wavelengthNm} nm)`
+                                          : ''
+                                      }`
+                                  )
+                                  .join(', ') || 'None'}
+                              </span>
+                            </div>
+                          </div>
+                          {session.isDemonstration && (
+                            <div className="text-[10.5px] text-[#92400E] bg-[#FFFBEB] border border-[#FDE68A] px-2.5 py-1">
+                              Synthetic Demonstration Analytical Session — for
+                              workflow inspection only; not real laboratory data.
+                            </div>
+                          )}
+                        </section>
+                      )}
 
-        {/* Exploratory Calibration OLS Regression Summary */}
-        {reportConfig.includeRegressionSummary &&
-          reportConfig.mode === 'post-experiment' &&
-          experiment.calibrationStandards.length > 0 && (
-            <section className="space-y-2 print-avoid-break">
-              <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
-                6b. Exploratory Calibration OLS Linear Regression
-              </h3>
-              <div className="border border-[#D1D5DB] p-3 text-[11px] space-y-2">
-                <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 font-mono tabular-nums">
-                  <div>
-                    <div className="font-sans text-[10px] uppercase text-[#6B7280]">
-                      Slope ({calYUnit}/{calXUnit})
-                    </div>
-                    <div className="font-semibold">
-                      {formatWithScientificNotation(
-                        analyticalBoundary.calibrationRegression.value.slope,
-                        { fixedDecimals: 4 }
+                      {/* Calibration Standards & Exploratory OLS Regression */}
+                      {showCalibrationRecords && calAnalyses.length > 0 && (
+                        <section className="print-avoid-break space-y-2">
+                          <h4 className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-[#4B5563]">
+                            Calibration Standards &amp; Exploratory OLS
+                            Regression — {session.sessionId}
+                          </h4>
+                          {calAnalyses.map(({ dataset: cal, analysis }) => {
+                            if (!analysis) return null;
+                            const reg = analysis.regression.value;
+                            const maxAbsResid =
+                              analysis.diagnosticPoints.length > 0
+                                ? Math.max(
+                                    ...analysis.diagnosticPoints.map((p) =>
+                                      Math.abs(p.residual)
+                                    )
+                                  )
+                                : null;
+                            return (
+                              <div
+                                key={cal.id}
+                                className="border border-[#D1D5DB] p-2.5 space-y-2 text-[10.5px]"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <strong className="font-mono text-[#111827]">
+                                    {cal.calibrationId}: {cal.title}
+                                  </strong>
+                                  <span className="font-mono text-[#4B5563]">
+                                    Units: {cal.concUnit} → {cal.responseUnit} ·
+                                    Included n={reg.validCount}/
+                                    {cal.standards.length}
+                                  </span>
+                                </div>
+                                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 font-mono tabular-nums bg-[#F8F9FA] p-2 border border-[#E5E7EB]">
+                                  <div>
+                                    <div className="font-sans text-[9.5px] uppercase text-[#6B7280]">
+                                      Slope
+                                    </div>
+                                    <div className="font-semibold">
+                                      {formatWithScientificNotation(reg.slope, {
+                                        fixedDecimals: 4,
+                                      })}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="font-sans text-[9.5px] uppercase text-[#6B7280]">
+                                      Intercept
+                                    </div>
+                                    <div>
+                                      {formatWithScientificNotation(
+                                        reg.intercept,
+                                        { fixedDecimals: 4 }
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="font-sans text-[9.5px] uppercase text-[#6B7280]">
+                                      R²
+                                    </div>
+                                    <div className="font-semibold">
+                                      {reg.rSquared !== null
+                                        ? reg.rSquared.toFixed(6)
+                                        : '—'}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="font-sans text-[9.5px] uppercase text-[#6B7280]">
+                                      RSS
+                                    </div>
+                                    <div>
+                                      {formatWithScientificNotation(reg.rss, {
+                                        fixedDecimals: 4,
+                                      })}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="font-sans text-[9.5px] uppercase text-[#6B7280]">
+                                      SEE
+                                    </div>
+                                    <div>
+                                      {formatWithScientificNotation(
+                                        reg.standardErrorOfEstimate,
+                                        { fixedDecimals: 4 }
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="font-sans text-[9.5px] uppercase text-[#6B7280]">
+                                      Max |Resid|
+                                    </div>
+                                    <div>
+                                      {formatWithScientificNotation(
+                                        maxAbsResid,
+                                        { fixedDecimals: 3 }
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="text-[10px] text-[#92400E]">
+                                  Exploratory Numerical Analysis — Not
+                                  Analytical Method Validation. Unweighted OLS
+                                  with free intercept; no LOD/LOQ or regulatory
+                                  acceptance is asserted.
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </section>
+                      )}
+
+                      {/* Embedded Analytical Figures */}
+                      {showAnalyticalFigures &&
+                        (activeCalAnalysis ||
+                          session.sampleMeasurements.length > 0) && (
+                          <section className="print-avoid-break space-y-2.5">
+                            <h4 className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-[#4B5563]">
+                              Analytical Figure — {session.sessionId} (
+                              {session.figureConfig.name})
+                            </h4>
+                            <AnalyticalFigureCanvas
+                              session={session}
+                              calibrationDataset={activeCal}
+                              calibrationAnalysis={activeCalAnalysis}
+                              config={session.figureConfig}
+                              height={225}
+                              compact
+                              showExportButtons={false}
+                            />
+                            {(session.savedFigures ?? [])
+                              .filter((f) =>
+                                (
+                                  reportConfig.selectedAnalyticalFigureIds ?? []
+                                ).includes(f.id)
+                              )
+                              .map((savedFig) => (
+                                <div
+                                  key={savedFig.id}
+                                  className="print-avoid-break"
+                                >
+                                  <AnalyticalFigureCanvas
+                                    session={session}
+                                    calibrationDataset={activeCal}
+                                    calibrationAnalysis={activeCalAnalysis}
+                                    config={savedFig}
+                                    height={220}
+                                    compact
+                                    showExportButtons={false}
+                                  />
+                                </div>
+                              ))}
+                          </section>
+                        )}
+
+                      {/* Sample Measurements Table */}
+                      {reportConfig.includeAnalyticalRecords && (
+                        <section className="space-y-1.5">
+                          <h4 className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-[#4B5563]">
+                            Recorded Instrument Sample Measurements —{' '}
+                            {session.sessionId} (
+                            {session.sampleMeasurements.length} rows)
+                          </h4>
+                          {session.sampleMeasurements.length === 0 ? (
+                            <p className="text-[11.5px] text-[#6B7280]">
+                              No instrument sample records logged in this
+                              session.
+                            </p>
+                          ) : (
+                            <table className="w-full text-left border-collapse text-[10px] border border-[#D1D5DB]">
+                              <thead>
+                                <tr className="bg-[#F3F4F6] border-b border-[#D1D5DB] text-[9.5px] uppercase tracking-[0.04em] text-[#4B5563]">
+                                  <th className="py-1.5 px-2 font-medium">
+                                    Sample ID
+                                  </th>
+                                  <th className="py-1.5 px-2 font-medium">
+                                    Analyte
+                                  </th>
+                                  <th className="py-1.5 px-2 font-medium">
+                                    Stage
+                                  </th>
+                                  <th className="py-1.5 px-2 font-medium">
+                                    Rep
+                                  </th>
+                                  <th className="py-1.5 px-2 font-medium text-right">
+                                    Dilution (×)
+                                  </th>
+                                  <th className="py-1.5 px-2 font-medium text-right">
+                                    Raw Signal
+                                  </th>
+                                  <th className="py-1.5 px-2 font-medium text-right">
+                                    Reported Conc.
+                                  </th>
+                                  <th className="py-1.5 px-2 font-medium">
+                                    Basis / Status
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-[#E5E7EB]">
+                                {session.sampleMeasurements.map((m) => (
+                                  <tr
+                                    key={m.id}
+                                    className={
+                                      m.qualityStatus === 'excluded_by_user'
+                                        ? 'opacity-50 line-through'
+                                        : ''
+                                    }
+                                  >
+                                    <td className="py-1 px-2 font-mono font-medium">
+                                      {m.sampleId}
+                                    </td>
+                                    <td className="py-1 px-2 font-mono">
+                                      {m.analyte || '—'}
+                                    </td>
+                                    <td className="py-1 px-2">{m.stage}</td>
+                                    <td className="py-1 px-2 font-mono">
+                                      {m.replicateId}
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-mono tabular-nums">
+                                      {formatScientificNumber(
+                                        m.dilutionFactor,
+                                        2
+                                      )}
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-mono tabular-nums">
+                                      {formatScientificNumber(m.rawSignal, 1)}{' '}
+                                      {m.signalUnit}
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-mono tabular-nums">
+                                      {formatQualifiedMeasurementValue(m)}
+                                    </td>
+                                    <td className="py-1 px-2 text-[#4B5563]">
+                                      {m.reportedValueBasis ===
+                                      'already_dilution_corrected'
+                                        ? 'Pre-corrected'
+                                        : 'As-measured'}{' '}
+                                      · {m.valueQualifier ?? 'valid_numeric'} ·{' '}
+                                      {m.qualityStatus || 'valid'}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </section>
+                      )}
+
+                      {/* Dilution Records */}
+                      {showDilutionRecords &&
+                        session.dilutionRecords.length > 0 && (
+                          <section className="print-avoid-break space-y-1.5">
+                            <h4 className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-[#4B5563]">
+                              Recorded Dilution Documentation —{' '}
+                              {session.sessionId} (
+                              {session.dilutionRecords.length})
+                            </h4>
+                            <table className="w-full text-left border-collapse text-[10px] border border-[#D1D5DB]">
+                              <thead>
+                                <tr className="bg-[#F3F4F6] border-b border-[#D1D5DB] text-[9.5px] uppercase text-[#4B5563]">
+                                  <th className="py-1 px-2 font-medium">
+                                    Sample ID
+                                  </th>
+                                  <th className="py-1 px-2 font-medium">
+                                    Stage
+                                  </th>
+                                  <th className="py-1 px-2 font-medium text-right">
+                                    Factor (×)
+                                  </th>
+                                  <th className="py-1 px-2 font-medium text-right">
+                                    Aliquot / Final (mL)
+                                  </th>
+                                  <th className="py-1 px-2 font-medium">
+                                    Diluent &amp; Basis
+                                  </th>
+                                  <th className="py-1 px-2 font-medium">
+                                    Verification
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-[#E5E7EB]">
+                                {session.dilutionRecords.map((d) => (
+                                  <tr key={d.id}>
+                                    <td className="py-1 px-2 font-mono font-medium">
+                                      {d.sampleId}
+                                    </td>
+                                    <td className="py-1 px-2">{d.stage}</td>
+                                    <td className="py-1 px-2 text-right font-mono tabular-nums">
+                                      {formatScientificNumber(
+                                        d.dilutionFactor,
+                                        2
+                                      )}
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-mono tabular-nums">
+                                      {formatScientificNumber(
+                                        d.sourceVolumeMl,
+                                        2
+                                      )}{' '}
+                                      /{' '}
+                                      {formatScientificNumber(
+                                        d.finalVolumeMl,
+                                        2
+                                      )}
+                                    </td>
+                                    <td className="py-1 px-2 text-[#4B5563]">
+                                      {d.matrixDescription || '—'} ·{' '}
+                                      {d.reportedValueBasis ===
+                                      'already_dilution_corrected'
+                                        ? 'Already corrected'
+                                        : 'As-measured'}
+                                    </td>
+                                    <td className="py-1 px-2 text-[#4B5563]">
+                                      {VERIFICATION_LABELS[d.verificationStatus]}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            {dilutionDiagnostics.length > 0 && (
+                              <div className="text-[10px] text-[#92400E] bg-[#FFFBEB] border border-[#FDE68A] px-2.5 py-1">
+                                Dilution diagnostics:{' '}
+                                {dilutionDiagnostics.length} consistency
+                                finding(s) flagged for review.
+                              </div>
+                            )}
+                          </section>
+                        )}
+
+                      {/* Analytical Quality Review Summary */}
+                      {showAnalyticalQuality && (
+                        <section className="print-avoid-break border border-[#E5E7EB] p-2.5 bg-[#F8F9FA] text-[10.5px] space-y-1">
+                          <div className="font-semibold text-[#111827]">
+                            Analytical Quality Review Summary —{' '}
+                            {session.sessionId} ({qualityIssues.length}{' '}
+                            diagnostic finding(s))
+                          </div>
+                          {qualityIssues.length === 0 ? (
+                            <div className="text-[#4B5563]">
+                              No automated completeness or metadata diagnostics
+                              triggered. Data completeness does not constitute
+                              analytical method validation.
+                            </div>
+                          ) : (
+                            <ul className="list-disc pl-4 space-y-0.5 text-[#374151]">
+                              {qualityIssues.slice(0, 8).map((iss) => {
+                                const rec = reviewMap.get(iss.issueKey);
+                                return (
+                                  <li key={iss.issueKey}>
+                                    <span className="font-mono font-medium">
+                                      [{rec?.status ?? 'Open'}]
+                                    </span>{' '}
+                                    <strong>{iss.recordLabel}</strong>:{' '}
+                                    {iss.description}
+                                    {rec?.researcherNotes
+                                      ? ` — Note: ${rec.researcherNotes}`
+                                      : ''}
+                                  </li>
+                                );
+                              })}
+                              {qualityIssues.length > 8 && (
+                                <li className="text-[#6B7280]">
+                                  …and {qualityIssues.length - 8} additional
+                                  finding(s) recorded in the Quality Review
+                                  workspace.
+                                </li>
+                              )}
+                            </ul>
+                          )}
+                        </section>
                       )}
                     </div>
-                  </div>
-                  <div>
-                    <div className="font-sans text-[10px] uppercase text-[#6B7280]">
-                      Intercept ({calYUnit})
-                    </div>
-                    <div>
-                      {formatWithScientificNotation(
-                        analyticalBoundary.calibrationRegression.value.intercept,
-                        { fixedDecimals: 4 }
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-sans text-[10px] uppercase text-[#6B7280]">
-                      R²
-                    </div>
-                    <div className="font-semibold">
-                      {analyticalBoundary.calibrationRegression.value.rSquared !==
-                      null
-                        ? analyticalBoundary.calibrationRegression.value.rSquared.toFixed(
-                            6
-                          )
-                        : '—'}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-sans text-[10px] uppercase text-[#6B7280]">
-                      RSS
-                    </div>
-                    <div>
-                      {formatWithScientificNotation(
-                        analyticalBoundary.calibrationRegression.value.rss,
-                        { fixedDecimals: 4 }
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-sans text-[10px] uppercase text-[#6B7280]">
-                      SEE ({calYUnit})
-                    </div>
-                    <div>
-                      {formatWithScientificNotation(
-                        analyticalBoundary.calibrationRegression.value
-                          .standardErrorOfEstimate,
-                        { fixedDecimals: 4 }
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-sans text-[10px] uppercase text-[#6B7280]">
-                      Included n
-                    </div>
-                    <div>
-                      {analyticalBoundary.calibrationRegression.value.validCount}
-                    </div>
-                  </div>
-                </div>
-                <div className="text-[10.5px] text-[#92400E]">
-                  Exploratory unweighted OLS regression (free intercept) for
-                  general numerical inspection only; does not constitute
-                  certified analytical method validation.
-                </div>
-              </div>
-            </section>
+                  )
+                )
+              )}
+
+              {/* Survey <-> Analytical Linkage Traceability Table */}
+              {showSurveyAnalyticalLinks &&
+                surveyAnalyticalLinkSummary.length > 0 && (
+                  <section className="print-avoid-break space-y-1.5 pt-2 border-t border-[#E5E7EB]">
+                    <h4 className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-[#4B5563]">
+                      6b. Survey–Analytical Measurement Linkage Traceability (
+                      {surveyAnalyticalLinkSummary.length} active link(s))
+                    </h4>
+                    <table className="w-full text-left border-collapse text-[10px] border border-[#D1D5DB]">
+                      <thead>
+                        <tr className="bg-[#F3F4F6] border-b border-[#D1D5DB] text-[9.5px] uppercase text-[#4B5563]">
+                          <th className="py-1 px-2 font-medium">Survey</th>
+                          <th className="py-1 px-2 font-medium">Stage</th>
+                          <th className="py-1 px-2 font-medium text-right">
+                            Survey Conc. (ppm)
+                          </th>
+                          <th className="py-1 px-2 font-medium">
+                            Linked Analytical Sample
+                          </th>
+                          <th className="py-1 px-2 font-medium text-right">
+                            Effective Analytical (ppm)
+                          </th>
+                          <th className="py-1 px-2 font-medium">Link Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#E5E7EB] font-mono tabular-nums">
+                        {surveyAnalyticalLinkSummary.map((row, idx) => (
+                          <tr
+                            key={`${row.datasetId}-${row.sampleId}-${row.stage}-${idx}`}
+                          >
+                            <td className="py-1 px-2">
+                              {row.datasetId} / {row.sampleId}
+                            </td>
+                            <td className="py-1 px-2 font-sans">{row.stage}</td>
+                            <td className="py-1 px-2 text-right">
+                              {formatScientificNumber(row.surveyValue, 2)}
+                            </td>
+                            <td className="py-1 px-2">
+                              {row.analyticalSampleId}
+                            </td>
+                            <td className="py-1 px-2 text-right">
+                              {formatScientificNumber(row.effectiveConc, 2)}
+                            </td>
+                            <td className="py-1 px-2 font-sans">
+                              {row.sourceUnavailable
+                                ? 'Source Unavailable'
+                                : row.hasDiscrepancy
+                                  ? 'Discrepancy Flagged'
+                                  : 'Aligned'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </section>
+                )}
+            </div>
           )}
 
         {/* Scientific References */}
@@ -1230,15 +2690,69 @@ export function LabReportWorkspace({
             </section>
           )}
 
-        {/* Bench Checklist */}
+        {/* Unified Sample Registry Summary */}
+        {reportConfig.includeSampleRegistry &&
+          sampleRegistrySummary.entries.length > 0 && (
+            <section className="print-avoid-break space-y-2 pt-2 border-t border-[#D1D5DB]">
+              <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
+                7b. Unified Sample Registry Summary (
+                {sampleRegistrySummary.entries.length} samples)
+              </h3>
+              <table className="w-full text-left border-collapse text-[10px] border border-[#D1D5DB]">
+                <thead>
+                  <tr className="bg-[#F3F4F6] border-b border-[#D1D5DB] text-[9.5px] uppercase text-[#4B5563]">
+                    <th className="py-1 px-2 font-medium">Sample Label</th>
+                    <th className="py-1 px-2 font-medium">Source Modules</th>
+                    <th className="py-1 px-2 font-medium text-right">
+                      Survey Rows
+                    </th>
+                    <th className="py-1 px-2 font-medium text-right">
+                      Analytical Rows
+                    </th>
+                    <th className="py-1 px-2 font-medium">Doc Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E5E7EB]">
+                  {sampleRegistrySummary.entries.slice(0, 24).map((entry) => (
+                    <tr key={entry.sampleKey}>
+                      <td className="py-1 px-2 font-mono font-medium">
+                        {entry.sampleId}
+                      </td>
+                      <td className="py-1 px-2 text-[#4B5563]">
+                        {entry.origin}
+                      </td>
+                      <td className="py-1 px-2 text-right font-mono tabular-nums">
+                        {entry.surveyMeasurement ? 1 : 0}
+                      </td>
+                      <td className="py-1 px-2 text-right font-mono tabular-nums">
+                        {entry.analyticalLinks.length}
+                      </td>
+                      <td className="py-1 px-2 text-[#374151]">
+                        {entry.documentationStatus}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {sampleRegistrySummary.entries.length > 24 && (
+                <div className="text-[10px] text-[#6B7280]">
+                  Showing first 24 of {sampleRegistrySummary.entries.length}{' '}
+                  tracked sample records (complete sample registry included in
+                  JSON/ZIP export).
+                </div>
+              )}
+            </section>
+          )}
+
+        {/* Bench Checklist & Milestones */}
         {reportConfig.includeBenchChecklist &&
-          experiment.benchChecklist.length > 0 && (
+          effectiveExperiment.benchChecklist.length > 0 && (
             <section className="print-avoid-break space-y-2">
               <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
-                8. Experiment Documentation Checklist
+                8. Research Milestones &amp; Documentation Checklist
               </h3>
               <ul className="text-[11.5px] space-y-1 border border-[#E5E7EB] p-3">
-                {experiment.benchChecklist.map((item) => (
+                {effectiveExperiment.benchChecklist.map((item) => (
                   <li
                     key={item.id}
                     className="flex items-baseline justify-between gap-4"
@@ -1258,24 +2772,53 @@ export function LabReportWorkspace({
             </section>
           )}
 
+        {/* Chronological Research Timeline */}
+        {reportConfig.includeResearchTimeline && timelineSummary.length > 0 && (
+          <section className="print-avoid-break space-y-2 pt-2 border-t border-[#D1D5DB]">
+            <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
+              8b. Chronological Research Timeline ({timelineSummary.length}{' '}
+              events)
+            </h3>
+            <ul className="divide-y divide-[#E5E7EB] border border-[#D1D5DB] text-[10.5px]">
+              {timelineSummary.slice(0, 15).map((ev) => (
+                <li
+                  key={ev.id}
+                  className="px-2.5 py-1.5 flex items-baseline justify-between gap-3"
+                >
+                  <div>
+                    <span className="font-mono text-[10px] text-[#6B7280]">
+                      [{ev.timestamp.slice(0, 16).replace('T', ' ')}]
+                    </span>{' '}
+                    <strong>{ev.sourceLabel || ev.eventType}</strong> —{' '}
+                    <span className="text-[#374151]">{ev.description}</span>
+                  </div>
+                  <span className="font-mono text-[10px] text-[#6B7280] shrink-0">
+                    {ev.author}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         {/* Observations */}
         {reportConfig.includeObservations && (
           <section className="print-avoid-break space-y-2">
             <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
               9. Observations &amp; Notes
             </h3>
-            {experiment.generalObservations && (
+            {effectiveExperiment.generalObservations && (
               <p className="text-[12px] text-[#111827] leading-relaxed">
-                {experiment.generalObservations}
+                {effectiveExperiment.generalObservations}
               </p>
             )}
-            {experiment.observations.length === 0 ? (
+            {effectiveExperiment.observations.length === 0 ? (
               <p className="text-[12px] text-[#6B7280]">
                 No timestamped observations recorded.
               </p>
             ) : (
               <ul className="divide-y divide-[#E5E7EB] border-t border-b border-[#E5E7EB] text-[11.5px]">
-                {experiment.observations.map((obs) => (
+                {effectiveExperiment.observations.map((obs) => (
                   <li key={obs.id} className="py-1.5">
                     <span className="font-mono text-[10.5px] text-[#6B7280]">
                       [{obs.timestamp.slice(0, 16).replace('T', ' ')}] (
@@ -1289,13 +2832,64 @@ export function LabReportWorkspace({
           </section>
         )}
 
+        {/* Researcher Conclusions */}
+        {reportConfig.researcherConclusions?.trim() && (
+          <section className="print-avoid-break space-y-1.5 pt-2 border-t border-[#D1D5DB]">
+            <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
+              10. Researcher Conclusions &amp; Summary
+            </h3>
+            <p className="text-[12px] text-[#111827] leading-relaxed whitespace-pre-line">
+              {reportConfig.researcherConclusions}
+            </p>
+          </section>
+        )}
+
+        {/* Snapshot & Reproducibility Provenance Block */}
+        {(reportConfig.includeSnapshotMetadata || activeFinalizedReport) && (
+          <section className="print-avoid-break border border-[#D1D5DB] bg-[#F8F9FA] p-3 text-[10.5px] space-y-1">
+            <div className="font-semibold uppercase tracking-[0.05em] text-[#4B5563]">
+              Reproducibility &amp; Provenance Metadata
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 font-mono text-[#374151]">
+              <div>
+                Software: SEA Workbench v{APP_VERSION} (Schema v
+                {WORKSPACE_SCHEMA_VERSION})
+              </div>
+              <div>Engine: {CALC_ENGINE_VERSION}</div>
+              <div>
+                Report State:{' '}
+                {activeFinalizedReport
+                  ? `Finalized v${activeFinalizedReport.versionNumber} (${activeFinalizedReport.snapshotId})`
+                  : 'Live Working Report'}
+              </div>
+              <div>
+                Snapshot Captured:{' '}
+                {boundSnapshot
+                  ? `${boundSnapshot.capturedAt.slice(0, 16).replace('T', ' ')} by ${boundSnapshot.researcher}`
+                  : 'Live state (unfrozen)'}
+              </div>
+            </div>
+            <div className="text-[10px] text-[#6B7280]">
+              Snapshots and finalized reports preserve point-in-time workspace
+              state inside local browser storage or exported JSON/ZIP packages.
+              They do not constitute regulated, tamper-proof electronic
+              signatures or analytical method validation.
+            </div>
+          </section>
+        )}
+
         {/* Footer */}
-        <footer className="pt-4 border-t border-[#D1D5DB] flex flex-wrap items-center justify-between gap-2 text-[10.5px] text-[#6B7280] print-avoid-break">
-          <span>{reportConfig.reportFooterNote}</span>
-          <span className="font-mono">
-            SEA Workbench v{APP_VERSION} · {experiment.experimentId}
-          </span>
-        </footer>
+        {reportConfig.includePageNumbers !== false && (
+          <footer className="pt-4 border-t border-[#D1D5DB] flex flex-wrap items-center justify-between gap-2 text-[10.5px] text-[#6B7280] print-avoid-break">
+            <span>{reportConfig.reportFooterNote}</span>
+            <span className="font-mono">
+              SEA Workbench v{APP_VERSION} · {effectiveExperiment.experimentId}
+              {activeFinalizedReport
+                ? ` · Finalized v${activeFinalizedReport.versionNumber}`
+                : ''}
+            </span>
+          </footer>
+        )}
       </article>
     </div>
   );

@@ -92,10 +92,12 @@ export function validateWorkspaceState(
     if (
       majorCandidate !== '1' &&
       majorCandidate !== '2' &&
-      majorCandidate !== '3'
+      majorCandidate !== '3' &&
+      majorCandidate !== '4' &&
+      majorCandidate !== '5'
     ) {
       errors.push(
-        `Incompatible major schema version "${candidate.schemaVersion}" (expected 1.x, 2.x, or "${WORKSPACE_SCHEMA_VERSION}").`
+        `Incompatible major schema version "${candidate.schemaVersion}" (expected 1.x–4.x or "${WORKSPACE_SCHEMA_VERSION}").`
       );
     } else if (candidate.schemaVersion !== WORKSPACE_SCHEMA_VERSION) {
       warnings.push(

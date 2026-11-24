@@ -1,10 +1,12 @@
 import {
   CALC_ENGINE_VERSION,
   DataProvenance,
+  InstrumentMeasurement,
   SurveyMeasurement,
 } from '../models/types';
 import { CalculationResult } from './calculationTypes';
 import { inspectNumericSeries } from './numericValidation';
+import { convertUnit } from './units';
 
 export interface DescriptiveStatsData {
   validCount: number;
@@ -284,4 +286,149 @@ export function computeSurveyReplicateGroups(
   }
 
   return summaries;
+}
+
+export interface AnalyticalLinkStatus {
+  surveyRowId: string;
+  stage: 'Initial' | 'Final';
+  linkedMeasurementId: string | null;
+  linkedRecord: InstrumentMeasurement | null;
+  sourceUnavailable: boolean;
+  linkedEffectiveConcPpm: number | null;
+  surveyRecordedConcPpm: number | null;
+  hasDiscrepancy: boolean;
+  discrepancyDeltaPpm: number | null;
+  conversionError: string | null;
+}
+
+/**
+ * Resolves explicit links between SurveyMeasurement rows and InstrumentMeasurement
+ * records via stable internal IDs. Detects missing/deleted source records and
+ * numerical discrepancies without silently overwriting user-entered survey records.
+ */
+export function resolveSurveyAnalyticalLinks(
+  surveyRows: SurveyMeasurement[],
+  instrumentRows: InstrumentMeasurement[],
+  tolerancePpm = 0.05
+): Record<string, { initial: AnalyticalLinkStatus; final: AnalyticalLinkStatus }> {
+  const instrumentById = new Map<string, InstrumentMeasurement>();
+  for (const m of instrumentRows) {
+    instrumentById.set(m.id, m);
+  }
+
+  const buildLink = (
+    row: SurveyMeasurement,
+    stage: 'Initial' | 'Final'
+  ): AnalyticalLinkStatus => {
+    const linkedId =
+      stage === 'Initial'
+        ? row.linkedInitialMeasurementId
+        : row.linkedFinalMeasurementId;
+    const surveyConc =
+      stage === 'Initial' ? row.initialConcPpm : row.finalConcPpm;
+
+    if (!linkedId) {
+      return {
+        surveyRowId: row.id,
+        stage,
+        linkedMeasurementId: null,
+        linkedRecord: null,
+        sourceUnavailable: false,
+        linkedEffectiveConcPpm: null,
+        surveyRecordedConcPpm: surveyConc,
+        hasDiscrepancy: false,
+        discrepancyDeltaPpm: null,
+        conversionError: null,
+      };
+    }
+
+    const record = instrumentById.get(linkedId) ?? null;
+    if (!record) {
+      return {
+        surveyRowId: row.id,
+        stage,
+        linkedMeasurementId: linkedId,
+        linkedRecord: null,
+        sourceUnavailable: true,
+        linkedEffectiveConcPpm: null,
+        surveyRecordedConcPpm: surveyConc,
+        hasDiscrepancy: false,
+        discrepancyDeltaPpm: null,
+        conversionError: null,
+      };
+    }
+
+    if (record.reportedConc === null || !Number.isFinite(record.reportedConc)) {
+      return {
+        surveyRowId: row.id,
+        stage,
+        linkedMeasurementId: linkedId,
+        linkedRecord: record,
+        sourceUnavailable: false,
+        linkedEffectiveConcPpm: null,
+        surveyRecordedConcPpm: surveyConc,
+        hasDiscrepancy: false,
+        discrepancyDeltaPpm: null,
+        conversionError: null,
+      };
+    }
+
+    const conv = convertUnit(record.reportedConc, record.concUnit || 'ppm', 'ppm');
+    if (!conv.ok || conv.value === null) {
+      return {
+        surveyRowId: row.id,
+        stage,
+        linkedMeasurementId: linkedId,
+        linkedRecord: record,
+        sourceUnavailable: false,
+        linkedEffectiveConcPpm: null,
+        surveyRecordedConcPpm: surveyConc,
+        hasDiscrepancy: false,
+        discrepancyDeltaPpm: null,
+        conversionError: conv.error,
+      };
+    }
+
+    const dilution =
+      record.reportedValueBasis === 'already_dilution_corrected'
+        ? 1
+        : record.dilutionFactor !== null &&
+            Number.isFinite(record.dilutionFactor) &&
+            record.dilutionFactor > 0
+          ? record.dilutionFactor
+          : 1;
+    const effectivePpm = conv.value * dilution;
+
+    let hasDiscrepancy = false;
+    let discrepancyDeltaPpm: number | null = null;
+    if (surveyConc !== null && Number.isFinite(surveyConc)) {
+      discrepancyDeltaPpm = surveyConc - effectivePpm;
+      hasDiscrepancy = Math.abs(discrepancyDeltaPpm) > tolerancePpm;
+    }
+
+    return {
+      surveyRowId: row.id,
+      stage,
+      linkedMeasurementId: linkedId,
+      linkedRecord: record,
+      sourceUnavailable: false,
+      linkedEffectiveConcPpm: effectivePpm,
+      surveyRecordedConcPpm: surveyConc,
+      hasDiscrepancy,
+      discrepancyDeltaPpm,
+      conversionError: null,
+    };
+  };
+
+  const result: Record<
+    string,
+    { initial: AnalyticalLinkStatus; final: AnalyticalLinkStatus }
+  > = {};
+  for (const row of surveyRows) {
+    result[row.id] = {
+      initial: buildLink(row, 'Initial'),
+      final: buildLink(row, 'Final'),
+    };
+  }
+  return result;
 }

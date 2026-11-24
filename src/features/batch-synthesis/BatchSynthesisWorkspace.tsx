@@ -1,12 +1,22 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { RefreshCw, Plus, Trash2, AlertTriangle, Lock } from 'lucide-react';
+import {
+  RefreshCw,
+  Plus,
+  Trash2,
+  AlertTriangle,
+  Lock,
+  BookmarkPlus,
+  FileStack,
+} from 'lucide-react';
 import {
   BatchConfiguration,
   DataProvenance,
   Experiment,
+  ExperimentTemplate,
   Precursor,
+  ResearchPlanMetadata,
   ResearchProject,
   ScientificReviewStatus,
   Support,
@@ -50,6 +60,7 @@ export function BatchSynthesisWorkspace({
   projects,
   supports,
   precursors,
+  experimentTemplates = [],
   onUpdateMeta,
   onUpdateBatch,
   onAssignSupport,
@@ -57,11 +68,18 @@ export function BatchSynthesisWorkspace({
   onRefreshSnapshot,
   onAddObservation,
   onDeleteObservation,
+  onUpdateResearchPlan,
+  onAddPlanDeviation,
+  onDeletePlanDeviation,
+  onApplyTemplate,
+  onSaveTemplate,
+  onDeleteTemplate,
 }: {
   experiment: Experiment;
   projects: ResearchProject[];
   supports: Support[];
   precursors: Precursor[];
+  experimentTemplates?: ExperimentTemplate[];
   onUpdateMeta: (
     patch: Partial<
       Pick<
@@ -81,9 +99,20 @@ export function BatchSynthesisWorkspace({
   onRefreshSnapshot: (kind: 'support' | 'precursor') => void;
   onAddObservation: (text: string) => void;
   onDeleteObservation: (obsId: string) => void;
+  onUpdateResearchPlan?: (patch: Partial<ResearchPlanMetadata>) => void;
+  onAddPlanDeviation?: (input: { description: string; reason: string }) => void;
+  onDeletePlanDeviation?: (deviationId: string) => void;
+  onApplyTemplate?: (templateId: string) => void;
+  onSaveTemplate?: (name: string, description: string) => void;
+  onDeleteTemplate?: (templateId: string) => void;
 }) {
   const [obsDraft, setObsDraft] = useState('');
   const [refreshConfirm, setRefreshConfirm] = useState<'support' | 'precursor' | null>(null);
+  const [devDesc, setDevDesc] = useState('');
+  const [devReason, setDevReason] = useState('');
+  const [templateNameDraft, setTemplateNameDraft] = useState('');
+  const [templateDescDraft, setTemplateDescDraft] = useState('');
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
 
   const calcBoundary = useMemo(
     () => evaluateBatchSynthesisBoundary(experiment.batch),
@@ -125,8 +154,8 @@ export function BatchSynthesisWorkspace({
   return (
     <div className="space-y-5">
       <WorkspaceHeader
-        title="Batch Synthesis"
-        description="Configure experiment metadata, lock immutable material snapshots, and record planned versus actual batch synthesis parameters."
+        title="Batch Synthesis & Research Planning"
+        description="Configure experiment metadata, lock immutable material snapshots, document structured research plans and deviations, and record planned versus actual batch synthesis parameters."
         metadata={
           <>
             <span>
@@ -931,6 +960,320 @@ export function BatchSynthesisWorkspace({
               )}
             </div>
           </Panel>
+
+          {/* Research Planning, Deviations & Reusable Documentation Templates */}
+          {onUpdateResearchPlan && (
+            <Panel>
+              <PanelHeader
+                title="Research Plan, Deviations & Documentation Templates"
+                subtitle="Structured planning metadata and documentation-only templates (never operational chemical preparation instructions)."
+              />
+              <div className="p-4 space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <FieldLabel htmlFor="plan-questions">
+                      Research Questions (one per line)
+                    </FieldLabel>
+                    <textarea
+                      id="plan-questions"
+                      rows={3}
+                      value={(
+                        experiment.researchPlan?.researchQuestions ?? []
+                      ).join('\n')}
+                      onChange={(e) =>
+                        onUpdateResearchPlan({
+                          researchQuestions: e.target.value
+                            .split('\n')
+                            .map((line) => line.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      placeholder="e.g., How does initial pH affect Pt uptake across the PZC window?"
+                      className="w-full p-2 text-[12px] text-[#111827] bg-[#F3F4F6] border border-[#E5E7EB] rounded-[6px] focus:bg-white focus:border-[#0F52BA]"
+                    />
+                  </div>
+                  <div>
+                    <FieldLabel htmlFor="plan-sample-ids">
+                      Planned Sample IDs (comma or newline separated)
+                    </FieldLabel>
+                    <textarea
+                      id="plan-sample-ids"
+                      rows={3}
+                      value={(
+                        experiment.researchPlan?.plannedSampleIds ?? []
+                      ).join(', ')}
+                      onChange={(e) =>
+                        onUpdateResearchPlan({
+                          plannedSampleIds: e.target.value
+                            .split(/[,\n]+/)
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      placeholder="e.g., UPT-01, UPT-02, UPT-03, BLK-01"
+                      className="w-full p-2 text-[12px] font-mono text-[#111827] bg-[#F3F4F6] border border-[#E5E7EB] rounded-[6px] focus:bg-white focus:border-[#0F52BA]"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <FieldLabel htmlFor="plan-meas-req">
+                      Planned Measurement Requirements
+                    </FieldLabel>
+                    <input
+                      id="plan-meas-req"
+                      type="text"
+                      value={
+                        experiment.researchPlan
+                          ?.plannedMeasurementRequirements ?? ''
+                      }
+                      onChange={(e) =>
+                        onUpdateResearchPlan({
+                          plannedMeasurementRequirements: e.target.value,
+                        })
+                      }
+                      placeholder="e.g., Initial/final pH (±0.02), duplicate aliquots, ICP-OES Pt 214.423 nm"
+                      className={inputBaseClass}
+                    />
+                  </div>
+                  <div>
+                    <FieldLabel htmlFor="plan-analytical">
+                      Planned Analytical Sessions
+                    </FieldLabel>
+                    <input
+                      id="plan-analytical"
+                      type="text"
+                      value={
+                        experiment.researchPlan?.plannedAnalyticalSessions ?? ''
+                      }
+                      onChange={(e) =>
+                        onUpdateResearchPlan({
+                          plannedAnalyticalSessions: e.target.value,
+                        })
+                      }
+                      placeholder="e.g., ICP-OES calibration 0.5–50 ppm + 10x diluted supernatants"
+                      className={inputBaseClass}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <FieldLabel htmlFor="plan-deliverables">
+                      Expected Research Deliverables
+                    </FieldLabel>
+                    <input
+                      id="plan-deliverables"
+                      type="text"
+                      value={experiment.researchPlan?.expectedDeliverables ?? ''}
+                      onChange={(e) =>
+                        onUpdateResearchPlan({
+                          expectedDeliverables: e.target.value,
+                        })
+                      }
+                      placeholder="e.g., Uptake vs pH figure, PZC shift plot, finalized A4 report"
+                      className={inputBaseClass}
+                    />
+                  </div>
+                  <div>
+                    <FieldLabel htmlFor="plan-refs">
+                      External Protocol References (comma separated)
+                    </FieldLabel>
+                    <input
+                      id="plan-refs"
+                      type="text"
+                      value={(
+                        experiment.researchPlan?.externalProtocolRefs ?? []
+                      ).join(', ')}
+                      onChange={(e) =>
+                        onUpdateResearchPlan({
+                          externalProtocolRefs: e.target.value
+                            .split(',')
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      placeholder="e.g., SOP-CAT-014, Lab Notebook Vol. 4 p. 82"
+                      className={inputBaseClass}
+                    />
+                  </div>
+                </div>
+
+                {/* Deviations Log */}
+                {onAddPlanDeviation && onDeletePlanDeviation && (
+                  <div className="pt-3 border-t border-[#E5E7EB] space-y-2">
+                    <div className="text-[11px] uppercase tracking-[0.05em] font-semibold text-[#4B5563]">
+                      Recorded Deviations from Plan (
+                      {(experiment.researchPlan?.deviations ?? []).length})
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                      <input
+                        type="text"
+                        aria-label="Deviation description"
+                        value={devDesc}
+                        onChange={(e) => setDevDesc(e.target.value)}
+                        placeholder="Deviation observed..."
+                        className={`${inputBaseClass} sm:col-span-5`}
+                      />
+                      <input
+                        type="text"
+                        aria-label="Deviation reason"
+                        value={devReason}
+                        onChange={(e) => setDevReason(e.target.value)}
+                        placeholder="Reason / impact note..."
+                        className={`${inputBaseClass} sm:col-span-5`}
+                      />
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="sm:col-span-2"
+                        disabled={!devDesc.trim()}
+                        onClick={() => {
+                          onAddPlanDeviation({
+                            description: devDesc.trim(),
+                            reason: devReason.trim(),
+                          });
+                          setDevDesc('');
+                          setDevReason('');
+                        }}
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        Log
+                      </Button>
+                    </div>
+                    {(experiment.researchPlan?.deviations ?? []).length > 0 && (
+                      <ul className="divide-y divide-[#E5E7EB] border border-[#E5E7EB] rounded-[6px] text-[12px]">
+                        {(experiment.researchPlan?.deviations ?? []).map(
+                          (dev) => (
+                            <li
+                              key={dev.id}
+                              className="px-3 py-2 flex items-start justify-between gap-2 bg-[#F8F9FA]"
+                            >
+                              <div className="min-w-0">
+                                <div className="font-medium text-[#111827]">
+                                  {dev.description}
+                                </div>
+                                {dev.reason && (
+                                  <div className="text-[#4B5563]">
+                                    Reason: {dev.reason}
+                                  </div>
+                                )}
+                                <div className="text-[10.5px] font-mono text-[#6B7280]">
+                                  {dev.timestamp.slice(0, 16).replace('T', ' ')}{' '}
+                                  · {dev.author}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                aria-label="Delete deviation"
+                                onClick={() => onDeletePlanDeviation(dev.id)}
+                                className="p-1 text-[#6B7280] hover:text-[#991B1B] cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </li>
+                          )
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
+                {/* Reusable Documentation Templates */}
+                {onApplyTemplate && onSaveTemplate && (
+                  <div className="pt-3 border-t border-[#E5E7EB] space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] uppercase tracking-[0.05em] font-semibold text-[#4B5563] inline-flex items-center gap-1.5">
+                        <FileStack className="w-3.5 h-3.5 text-[#0F52BA]" />
+                        Documentation Templates ({experimentTemplates.length})
+                      </span>
+                      <span className="text-[10.5px] text-[#6B7280]">
+                        Structure-only templates — no chemical recipes
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        aria-label="Select documentation template"
+                        value={selectedTemplateId}
+                        onChange={(e) => setSelectedTemplateId(e.target.value)}
+                        className="h-8 px-2.5 text-[12px] bg-white border border-[#E5E7EB] rounded-[6px] flex-1 min-w-[200px]"
+                      >
+                        <option value="">
+                          — Select Documentation Template —
+                        </option>
+                        {experimentTemplates.map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.name} ({t.experimentType})
+                          </option>
+                        ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={!selectedTemplateId}
+                        onClick={() => {
+                          if (selectedTemplateId) {
+                            onApplyTemplate(selectedTemplateId);
+                          }
+                        }}
+                      >
+                        Apply Structure
+                      </Button>
+                      {onDeleteTemplate && selectedTemplateId && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          ariaLabel="Delete selected template"
+                          onClick={() => {
+                            onDeleteTemplate(selectedTemplateId);
+                            setSelectedTemplateId('');
+                          }}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                      <input
+                        type="text"
+                        aria-label="New template name"
+                        value={templateNameDraft}
+                        onChange={(e) => setTemplateNameDraft(e.target.value)}
+                        placeholder="Save current plan as template name..."
+                        className={`${inputBaseClass} sm:col-span-5`}
+                      />
+                      <input
+                        type="text"
+                        aria-label="New template description"
+                        value={templateDescDraft}
+                        onChange={(e) => setTemplateDescDraft(e.target.value)}
+                        placeholder="Short template description..."
+                        className={`${inputBaseClass} sm:col-span-5`}
+                      />
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        className="sm:col-span-2"
+                        disabled={!templateNameDraft.trim()}
+                        onClick={() => {
+                          onSaveTemplate(
+                            templateNameDraft.trim(),
+                            templateDescDraft.trim()
+                          );
+                          setTemplateNameDraft('');
+                          setTemplateDescDraft('');
+                        }}
+                      >
+                        <BookmarkPlus className="w-3.5 h-3.5" />
+                        Save
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Panel>
+          )}
 
           {/* Observations */}
           <Panel>

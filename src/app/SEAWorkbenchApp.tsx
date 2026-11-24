@@ -9,6 +9,7 @@ import { Button, EmptyState } from '../components/ui/Primitives';
 import { ExperimentLibrary } from '../features/experiments/ExperimentLibrary';
 import { NewExperimentModal } from '../features/experiments/NewExperimentModal';
 import { WorkspaceTransferModal } from '../features/experiments/WorkspaceTransferModal';
+import { ExperimentOverviewWorkspace } from '../features/overview/ExperimentOverviewWorkspace';
 import { BatchSynthesisWorkspace } from '../features/batch-synthesis/BatchSynthesisWorkspace';
 import { UptakeSurveyWorkspace } from '../features/uptake-survey/UptakeSurveyWorkspace';
 import { DilutionStandardsWorkspace } from '../features/analytical/DilutionStandardsWorkspace';
@@ -28,6 +29,10 @@ export function SEAWorkbenchApp() {
 
   const activeExperiment =
     store.experiments.find((e) => e.uuid === store.activeExperimentUuid) ?? null;
+
+  const activeProject = activeExperiment?.projectId
+    ? store.projects.find((p) => p.id === activeExperiment.projectId) ?? null
+    : null;
 
   const handlePrintReport = () => {
     if (!activeExperiment) return;
@@ -65,9 +70,16 @@ export function SEAWorkbenchApp() {
         }}
         onUpdateStatus={(status) => {
           if (activeExperiment) {
-            store.updateExperimentMeta(activeExperiment.uuid, { status });
+            store.transitionExperimentStatus(
+              activeExperiment.uuid,
+              status,
+              'Status updated from workspace top bar.'
+            );
           }
         }}
+        onOpenOverview={() =>
+          store.navigateToContext({ module: 'overview', overviewTab: 'summary' })
+        }
         onOpenNewExperiment={() => setNewExpOpen(true)}
         onSaveRun={() => {
           store.saveNow();
@@ -82,8 +94,10 @@ export function SEAWorkbenchApp() {
           collapsed={store.preferences.sidebarCollapsed}
           storageBytes={store.storageBytes}
           storageError={store.storageError}
+          storageDiagnostics={store.storageDiagnostics}
           experimentCount={store.experiments.length}
           onSelectModule={store.setActiveModule}
+          onOpenBackup={() => setTransferOpen(true)}
         />
 
         <main className="flex-1 min-w-0 overflow-y-auto px-4 sm:px-6 lg:px-8 py-6 print:overflow-visible print:p-0">
@@ -171,12 +185,74 @@ export function SEAWorkbenchApp() {
               />
             )}
 
+            {activeExperiment && store.activeModule === 'overview' && (
+              <ExperimentOverviewWorkspace
+                experiment={activeExperiment}
+                project={activeProject}
+                supports={store.supports}
+                precursors={store.precursors}
+                activeTab={store.navigationContext.overviewTab}
+                onChangeTab={store.setOverviewTab}
+                onTransitionStatus={(newStatus, explanation, options) =>
+                  store.transitionExperimentStatus(
+                    activeExperiment.uuid,
+                    newStatus,
+                    explanation,
+                    options
+                  )
+                }
+                onUpdateSampleNote={(note) =>
+                  store.updateSampleRegistryNote(activeExperiment.uuid, note)
+                }
+                onUpdateAnalyticalReview={(sessionId, payload) => {
+                  if (
+                    sessionId &&
+                    sessionId !== activeExperiment.activeAnalyticalSessionId
+                  ) {
+                    store.selectAnalyticalSession(
+                      activeExperiment.uuid,
+                      sessionId
+                    );
+                  }
+                  store.updateAnalyticalReviewStatus(activeExperiment.uuid, {
+                    ...payload,
+                    provenance: 'user_entered',
+                  });
+                }}
+                onCreateSnapshot={(input) =>
+                  store.createExperimentSnapshot(activeExperiment.uuid, {
+                    ...input,
+                    researcher: activeExperiment.researcher || 'Researcher',
+                  })
+                }
+                onDeleteSnapshot={(snapshotId) =>
+                  store.deleteExperimentSnapshot(
+                    activeExperiment.uuid,
+                    snapshotId
+                  )
+                }
+                onRestoreSnapshot={(snapshotId) =>
+                  store.restoreExperimentSnapshot(
+                    activeExperiment.uuid,
+                    snapshotId
+                  )
+                }
+                onNavigate={(target) =>
+                  store.navigateToContext({
+                    ...target,
+                    experimentUuid: activeExperiment.uuid,
+                  })
+                }
+              />
+            )}
+
             {activeExperiment && store.activeModule === 'batch-synthesis' && (
               <BatchSynthesisWorkspace
                 experiment={activeExperiment}
                 projects={store.projects}
                 supports={store.supports}
                 precursors={store.precursors}
+                experimentTemplates={store.experimentTemplates ?? []}
                 onUpdateMeta={(patch) =>
                   store.updateExperimentMeta(activeExperiment.uuid, patch)
                 }
@@ -210,6 +286,61 @@ export function SEAWorkbenchApp() {
                 onDeleteObservation={(obsId) =>
                   store.deleteObservation(activeExperiment.uuid, obsId)
                 }
+                onUpdateResearchPlan={(patch) =>
+                  store.updateResearchPlan(activeExperiment.uuid, patch)
+                }
+                onAddPlanDeviation={(dev) =>
+                  store.addPlanDeviation(activeExperiment.uuid, {
+                    ...dev,
+                    author: activeExperiment.researcher || 'Researcher',
+                  })
+                }
+                onDeletePlanDeviation={(deviationId) =>
+                  store.deletePlanDeviation(activeExperiment.uuid, deviationId)
+                }
+                onApplyTemplate={(templateId) =>
+                  store.applyExperimentTemplate(
+                    activeExperiment.uuid,
+                    templateId
+                  )
+                }
+                onSaveTemplate={(name, description) =>
+                  store.saveExperimentTemplate({
+                    name,
+                    description,
+                    experimentType: activeExperiment.type,
+                    defaultObjective: activeExperiment.objective,
+                    researchQuestions: [
+                      ...(activeExperiment.researchPlan?.researchQuestions ?? []),
+                    ],
+                    sampleNamingConvention: (
+                      activeExperiment.researchPlan?.plannedSampleIds ?? []
+                    ).join(', '),
+                    plannedMeasurementRequirements:
+                      activeExperiment.researchPlan
+                        ?.plannedMeasurementRequirements ?? '',
+                    plannedAnalyticalSessions:
+                      activeExperiment.researchPlan
+                        ?.plannedAnalyticalSessions ?? '',
+                    expectedDeliverables:
+                      activeExperiment.researchPlan?.expectedDeliverables ?? '',
+                    externalProtocolRefs: [
+                      ...(activeExperiment.researchPlan?.externalProtocolRefs ??
+                        []),
+                    ],
+                    defaultMilestones: (activeExperiment.milestones ?? []).map(
+                      (m) => ({
+                        title: m.title,
+                        description: m.description,
+                        plannedDateTime: m.plannedDateTime,
+                      })
+                    ),
+                    preferredReportType:
+                      activeExperiment.reportConfig.reportType ??
+                      'complete-research',
+                  })
+                }
+                onDeleteTemplate={store.deleteExperimentTemplate}
               />
             )}
 
@@ -217,6 +348,16 @@ export function SEAWorkbenchApp() {
               <UptakeSurveyWorkspace
                 experiment={activeExperiment}
                 allExperiments={store.experiments}
+                requestedTab={
+                  store.navigationContext.surveyTab as
+                    | 'overview'
+                    | 'data'
+                    | 'analysis'
+                    | 'figures'
+                    | 'interpretation'
+                    | null
+                }
+                navigationNonce={store.navigationContext.navigationNonce}
                 onSelectDataset={(datasetId) =>
                   store.selectSurveyDataset(activeExperiment.uuid, datasetId)
                 }
@@ -350,24 +491,135 @@ export function SEAWorkbenchApp() {
             {activeExperiment && store.activeModule === 'analytical' && (
               <DilutionStandardsWorkspace
                 experiment={activeExperiment}
-                onUpdateConfig={(patch) =>
-                  store.updateAnalyticalConfig(activeExperiment.uuid, patch)
+                templates={store.importMappingTemplates ?? []}
+                requestedTab={
+                  store.navigationContext.analyticalTab as
+                    | 'overview'
+                    | 'calibration'
+                    | 'samples'
+                    | 'dilutions'
+                    | 'quality'
+                    | 'figures'
+                    | null
                 }
-                onAddStandard={() =>
-                  store.addCalibrationStandard(activeExperiment.uuid)
+                navigationNonce={store.navigationContext.navigationNonce}
+                onSelectSession={(sessionId) =>
+                  store.selectAnalyticalSession(activeExperiment.uuid, sessionId)
                 }
-                onUpdateStandard={(stdId, patch) =>
-                  store.updateCalibrationStandard(
+                onCreateSession={(input) =>
+                  store.createAnalyticalSession(activeExperiment.uuid, input)
+                }
+                onLoadSyntheticSession={(technique) =>
+                  store.loadSyntheticAnalyticalSession(
                     activeExperiment.uuid,
+                    technique
+                  )
+                }
+                onUpdateSessionMeta={(sessionId, patch) =>
+                  store.updateAnalyticalSessionMeta(
+                    activeExperiment.uuid,
+                    sessionId,
+                    patch
+                  )
+                }
+                onDuplicateSession={(sessionId) =>
+                  store.duplicateAnalyticalSession(
+                    activeExperiment.uuid,
+                    sessionId
+                  )
+                }
+                onArchiveSession={(sessionId) =>
+                  store.archiveAnalyticalSession(
+                    activeExperiment.uuid,
+                    sessionId
+                  )
+                }
+                onDeleteSession={(sessionId) =>
+                  store.deleteAnalyticalSession(activeExperiment.uuid, sessionId)
+                }
+                onSelectAnalyte={(analyteId) =>
+                  store.selectAnalyticalAnalyte(activeExperiment.uuid, analyteId)
+                }
+                onAddAnalyte={(analyte) =>
+                  store.addAnalyticalAnalyte(activeExperiment.uuid, analyte)
+                }
+                onUpdateAnalyte={(analyteId, patch) =>
+                  store.updateAnalyticalAnalyte(
+                    activeExperiment.uuid,
+                    analyteId,
+                    patch
+                  )
+                }
+                onDeleteAnalyte={(analyteId) =>
+                  store.deleteAnalyticalAnalyte(activeExperiment.uuid, analyteId)
+                }
+                onSelectCalDataset={(calId) =>
+                  store.selectCalibrationDataset(activeExperiment.uuid, calId)
+                }
+                onCreateCalDataset={(input) =>
+                  store.createCalibrationDataset(activeExperiment.uuid, input)
+                }
+                onDuplicateCalDataset={(calId) =>
+                  store.duplicateCalibrationDataset(activeExperiment.uuid, calId)
+                }
+                onUpdateCalDatasetMeta={(calId, patch) =>
+                  store.updateCalibrationDatasetMeta(
+                    activeExperiment.uuid,
+                    calId,
+                    patch
+                  )
+                }
+                onDeleteCalDataset={(calId) =>
+                  store.deleteCalibrationDataset(activeExperiment.uuid, calId)
+                }
+                onAddStandard={(calId, initial) =>
+                  store.addCalibrationStandardToDataset(
+                    activeExperiment.uuid,
+                    calId,
+                    initial
+                  )
+                }
+                onAddStandardsBulk={(calId, standards) =>
+                  store.addCalibrationStandardsBulk(
+                    activeExperiment.uuid,
+                    calId,
+                    standards
+                  )
+                }
+                onUpdateStandard={(calId, stdId, patch) =>
+                  store.updateCalibrationStandardInDataset(
+                    activeExperiment.uuid,
+                    calId,
                     stdId,
                     patch
                   )
                 }
-                onDeleteStandard={(stdId) =>
-                  store.deleteCalibrationStandard(activeExperiment.uuid, stdId)
+                onDeleteStandard={(calId, stdId) =>
+                  store.deleteCalibrationStandardInDataset(
+                    activeExperiment.uuid,
+                    calId,
+                    stdId
+                  )
                 }
                 onAddSample={(stage) =>
                   store.addInstrumentMeasurement(activeExperiment.uuid, stage)
+                }
+                onAddSamplesBulk={(rows, importRecord) =>
+                  store.addAnalyticalSamplesBulk(
+                    activeExperiment.uuid,
+                    rows,
+                    importRecord
+                  )
+                }
+                onDuplicateSamples={(rowIds) =>
+                  store.duplicateAnalyticalSamples(activeExperiment.uuid, rowIds)
+                }
+                onBulkUpdateSamples={(rowIds, patch) =>
+                  store.bulkUpdateAnalyticalSamples(
+                    activeExperiment.uuid,
+                    rowIds,
+                    patch
+                  )
                 }
                 onUpdateSample={(rowId, patch) =>
                   store.updateInstrumentMeasurement(
@@ -378,6 +630,75 @@ export function SEAWorkbenchApp() {
                 }
                 onDeleteSample={(rowId) =>
                   store.deleteInstrumentMeasurement(activeExperiment.uuid, rowId)
+                }
+                onDeleteSamplesBulk={(rowIds) =>
+                  store.deleteAnalyticalSamplesBulk(
+                    activeExperiment.uuid,
+                    rowIds
+                  )
+                }
+                onSaveTemplate={store.saveImportMappingTemplate}
+                onDeleteTemplate={store.deleteImportMappingTemplate}
+                onLinkToSurvey={(params) =>
+                  store.linkAnalyticalToSurveyMeasurement(
+                    activeExperiment.uuid,
+                    params
+                  )
+                }
+                onUnlinkFromSurvey={(params) =>
+                  store.unlinkAnalyticalFromSurveyMeasurement(
+                    activeExperiment.uuid,
+                    params
+                  )
+                }
+                onApplyAnalyticalToSurvey={(params) =>
+                  store.applyAnalyticalValueToSurvey(
+                    activeExperiment.uuid,
+                    params
+                  )
+                }
+                onAddDilutionRecord={(record) =>
+                  store.addDilutionRecord(activeExperiment.uuid, record)
+                }
+                onUpdateDilutionRecord={(recordId, patch) =>
+                  store.updateDilutionRecord(
+                    activeExperiment.uuid,
+                    recordId,
+                    patch
+                  )
+                }
+                onDeleteDilutionRecord={(recordId) =>
+                  store.deleteDilutionRecord(activeExperiment.uuid, recordId)
+                }
+                onUpdateReviewStatus={(input) =>
+                  store.updateAnalyticalReviewStatus(
+                    activeExperiment.uuid,
+                    input
+                  )
+                }
+                onUpdateFigureConfig={(patch) =>
+                  store.updateAnalyticalFigureConfig(
+                    activeExperiment.uuid,
+                    patch
+                  )
+                }
+                onSaveFigurePreset={(name) =>
+                  store.saveAnalyticalFigurePreset(activeExperiment.uuid, name)
+                }
+                onLoadFigurePreset={(figureId) =>
+                  store.loadAnalyticalFigurePreset(
+                    activeExperiment.uuid,
+                    figureId
+                  )
+                }
+                onDeleteFigurePreset={(figureId) =>
+                  store.deleteAnalyticalFigurePreset(
+                    activeExperiment.uuid,
+                    figureId
+                  )
+                }
+                onUpdateComparison={(patch) =>
+                  store.updateAnalyticalComparison(activeExperiment.uuid, patch)
                 }
               />
             )}
@@ -413,17 +734,64 @@ export function SEAWorkbenchApp() {
                     logMessage
                   )
                 }
-                onAddObservation={(text) =>
+                onAddObservation={(text, options) =>
                   store.addObservation(activeExperiment.uuid, {
                     module: 'bench-runner',
-                    category: 'Bench',
+                    category: options?.category ?? 'General observation',
                     author: activeExperiment.researcher || 'Researcher',
                     text,
                     provenance: 'user_entered',
+                    references: options?.references,
                   })
                 }
                 onDeleteObservation={(obsId) =>
                   store.deleteObservation(activeExperiment.uuid, obsId)
+                }
+                onAddMilestone={(input) =>
+                  store.addMilestone(activeExperiment.uuid, input)
+                }
+                onUpdateMilestone={(milestoneId, patch) =>
+                  store.updateMilestone(
+                    activeExperiment.uuid,
+                    milestoneId,
+                    patch
+                  )
+                }
+                onReorderMilestone={(milestoneId, direction) =>
+                  store.reorderMilestone(
+                    activeExperiment.uuid,
+                    milestoneId,
+                    direction
+                  )
+                }
+                onDuplicateMilestone={(milestoneId) =>
+                  store.duplicateMilestone(activeExperiment.uuid, milestoneId)
+                }
+                onSetMilestoneStatus={(milestoneId, status) =>
+                  store.setMilestoneStatus(
+                    activeExperiment.uuid,
+                    milestoneId,
+                    status
+                  )
+                }
+                onDeleteMilestone={(milestoneId) =>
+                  store.deleteMilestone(activeExperiment.uuid, milestoneId)
+                }
+                onAddResearchTimer={(input) =>
+                  store.addResearchTimer(activeExperiment.uuid, input)
+                }
+                onUpdateResearchTimer={(timerId, patch, historyAction, detail) =>
+                  store.updateResearchTimer(
+                    activeExperiment.uuid,
+                    timerId,
+                    patch,
+                    historyAction
+                      ? { action: historyAction, detail: detail ?? '' }
+                      : undefined
+                  )
+                }
+                onDeleteResearchTimer={(timerId) =>
+                  store.deleteResearchTimer(activeExperiment.uuid, timerId)
                 }
               />
             )}
@@ -435,6 +803,12 @@ export function SEAWorkbenchApp() {
                 projects={store.projects}
                 onUpdateReportConfig={(patch) =>
                   store.updateReportConfig(activeExperiment.uuid, patch)
+                }
+                onCreateFinalizedReport={(input) =>
+                  store.createFinalizedReport(activeExperiment.uuid, input)
+                }
+                onDeleteFinalizedReport={(reportId) =>
+                  store.deleteFinalizedReport(activeExperiment.uuid, reportId)
                 }
               />
             )}
@@ -450,12 +824,8 @@ export function SEAWorkbenchApp() {
         existingExperiments={store.experiments}
         defaultResearcher={store.preferences.defaultResearcher}
         onCreate={(input) => {
-          const created = store.createExperiment(input);
-          if (created.type === 'Batch Synthesis') {
-            store.setActiveModule('batch-synthesis');
-          } else {
-            store.setActiveModule('uptake-survey');
-          }
+          store.createExperiment(input);
+          store.navigateToContext({ module: 'overview', overviewTab: 'summary' });
         }}
       />
 
@@ -464,6 +834,8 @@ export function SEAWorkbenchApp() {
         onClose={() => setTransferOpen(false)}
         getSerializableWorkspace={store.getSerializableWorkspace}
         onImportWorkspace={store.replaceWorkspace}
+        storageDiagnostics={store.storageDiagnostics}
+        onBackupExported={store.markBackupExported}
       />
     </div>
   );

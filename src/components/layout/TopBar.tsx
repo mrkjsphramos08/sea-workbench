@@ -19,6 +19,9 @@ const STATUS_OPTIONS: ExperimentStatus[] = [
   'Draft',
   'Planned',
   'In Progress',
+  'Measurements Pending',
+  'Analysis in Progress',
+  'Under Review',
   'Completed',
   'Archived',
 ];
@@ -49,6 +52,7 @@ export function TopBar({
   onSaveRun,
   onOpenLoadRun,
   onPrintReport,
+  onOpenOverview,
 }: {
   activeExperiment: Experiment | null;
   sidebarCollapsed: boolean;
@@ -61,6 +65,7 @@ export function TopBar({
   onSaveRun: () => void;
   onOpenLoadRun: () => void;
   onPrintReport: () => void;
+  onOpenOverview?: () => void;
 }) {
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const displayedTitle =
@@ -107,12 +112,14 @@ export function TopBar({
       <div className="flex-1 min-w-0 max-w-2xl flex items-center justify-center gap-2">
         {activeExperiment ? (
           <>
-            <span
-              className="font-mono tabular-nums text-[12px] font-medium text-[#0F52BA] bg-[#F3F4F6] border border-[#E5E7EB] rounded-[6px] px-2 py-1 whitespace-nowrap shrink-0"
-              title={`Internal UUID: ${activeExperiment.uuid}`}
+            <button
+              type="button"
+              onClick={() => onOpenOverview?.()}
+              className="font-mono tabular-nums text-[12px] font-medium text-[#0F52BA] bg-[#F3F4F6] border border-[#E5E7EB] hover:border-[#0F52BA] rounded-[6px] px-2 py-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+              title={`Open Experiment Overview (${activeExperiment.experimentId} · UUID ${activeExperiment.uuid})`}
             >
               {activeExperiment.experimentId}
-            </span>
+            </button>
             <input
               type="text"
               aria-label="Active experiment title"

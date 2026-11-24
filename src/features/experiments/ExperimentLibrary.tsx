@@ -43,6 +43,9 @@ const STATUSES: Array<ExperimentStatus | 'All'> = [
   'Draft',
   'Planned',
   'In Progress',
+  'Measurements Pending',
+  'Analysis in Progress',
+  'Under Review',
   'Completed',
   'Archived',
 ];
@@ -59,9 +62,9 @@ function formatShortDate(iso: string): string {
   }
 }
 
-function defaultModuleForType(type: ExperimentType): ActiveModule {
-  if (type === 'Batch Synthesis') return 'batch-synthesis';
-  return 'uptake-survey';
+function defaultModuleForType(_type: ExperimentType): ActiveModule {
+  void _type;
+  return 'overview';
 }
 
 export function ExperimentLibrary({
