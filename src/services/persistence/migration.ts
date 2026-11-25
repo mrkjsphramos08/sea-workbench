@@ -1099,6 +1099,17 @@ function migrateExperiment(exp: Experiment): Experiment {
       exp.reportConfig.includeAnalyticalQualityReview ?? true,
     includeSurveyAnalyticalLinks:
       exp.reportConfig.includeSurveyAnalyticalLinks ?? true,
+    includeCrossExperimentSummary:
+      exp.reportConfig.includeCrossExperimentSummary ?? true,
+    includeResearchMatrix: exp.reportConfig.includeResearchMatrix ?? true,
+    includeAdvancedStatistics:
+      exp.reportConfig.includeAdvancedStatistics ?? true,
+    includeMeasurementUncertainty:
+      exp.reportConfig.includeMeasurementUncertainty ?? true,
+    includeCompatibilityLimitations:
+      exp.reportConfig.includeCompatibilityLimitations ?? true,
+    includeAnalysisAssumptions:
+      exp.reportConfig.includeAnalysisAssumptions ?? true,
     includeDataQualityLimitations:
       exp.reportConfig.includeDataQualityLimitations ?? true,
     includeResearchInterpretations:
@@ -1206,6 +1217,9 @@ function migrateExperiment(exp: Experiment): Experiment {
     finalizedReports: Array.isArray(exp.finalizedReports)
       ? exp.finalizedReports
       : [],
+    uncertaintyRecords: Array.isArray(exp.uncertaintyRecords)
+      ? exp.uncertaintyRecords
+      : [],
     reportConfig,
   };
 
@@ -1244,7 +1258,8 @@ export function migrateWorkspaceToCurrentSchema(raw: unknown): MigrationResult {
     major !== '2' &&
     major !== '3' &&
     major !== '4' &&
-    major !== '5'
+    major !== '5' &&
+    major !== '6'
   ) {
     return {
       ok: false,
@@ -1254,14 +1269,18 @@ export function migrateWorkspaceToCurrentSchema(raw: unknown): MigrationResult {
       data: null,
       notes: [],
       errors: [
-        `Incompatible major schema version "${version}" (supported: 1.x–4.x or ${WORKSPACE_SCHEMA_VERSION}).`,
+        `Incompatible major schema version "${version}" (supported: 1.x–5.x or ${WORKSPACE_SCHEMA_VERSION}).`,
       ],
     };
   }
 
   const workspace = raw as unknown as WorkspaceStateData;
   const migratedFromOlder =
-    major === '1' || major === '2' || major === '3' || major === '4';
+    major === '1' ||
+    major === '2' ||
+    major === '3' ||
+    major === '4' ||
+    major === '5';
 
   const importMappingTemplates: ImportMappingTemplate[] =
     Array.isArray(workspace.importMappingTemplates) &&
@@ -1284,6 +1303,15 @@ export function migrateWorkspaceToCurrentSchema(raw: unknown): MigrationResult {
     experiments: (workspace.experiments ?? []).map(migrateExperiment),
     importMappingTemplates,
     experimentTemplates,
+    researchComparisonConfigs: Array.isArray(workspace.researchComparisonConfigs)
+      ? workspace.researchComparisonConfigs
+      : [],
+    researchMatrixConfigs: Array.isArray(workspace.researchMatrixConfigs)
+      ? workspace.researchMatrixConfigs
+      : [],
+    researchAnalysisSnapshots: Array.isArray(workspace.researchAnalysisSnapshots)
+      ? workspace.researchAnalysisSnapshots
+      : [],
   };
 
   return {
@@ -1294,7 +1322,7 @@ export function migrateWorkspaceToCurrentSchema(raw: unknown): MigrationResult {
     data: upgraded,
     notes: migratedFromOlder
       ? [
-          `Migrated workspace schema (${version}) to Phase 5 (${WORKSPACE_SCHEMA_VERSION}) while preserving all experiments, survey datasets, analytical sessions, measurement qualifiers, UUIDs, links, snapshots, timers, and null values.`,
+          `Migrated workspace schema (${version}) to Phase 6 (${WORKSPACE_SCHEMA_VERSION}) while preserving all experiments, survey datasets, analytical sessions, measurement qualifiers, UUIDs, links, snapshots, timers, uncertainty records, and null values.`,
         ]
       : [],
     errors: [],

@@ -30,6 +30,7 @@ const MODULE_LABELS: Record<ActiveModule, string> = {
   'batch-synthesis': 'Batch & Planning',
   'uptake-survey': 'Uptake Survey',
   analytical: 'Analytical',
+  'research-analytics': 'Research Analytics',
   'bench-runner': 'Bench Runner',
   'lab-report': 'Reports',
   databases: 'Materials DB',

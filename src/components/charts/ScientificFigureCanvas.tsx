@@ -21,6 +21,7 @@ import {
   LineStyle,
   MarkerShape,
   MeasurementQualityStatus,
+  MeasurementUncertaintyRecord,
   ReferencePzcMarker,
   SurveyDataset,
 } from '../../domain/models/types';
@@ -29,8 +30,10 @@ import {
   SurveyPointSummary,
   analyzeSurveyDataset,
   buildSurveyChartSeries,
+  computeAdvancedDescriptiveStatistics,
   computeDistributionBins,
   formatScientificNumber,
+  formatUncertaintyTypeLabel,
 } from '../../domain/calculations/seaMath';
 import {
   exportChartContainerToPng,
@@ -184,6 +187,7 @@ interface PlotPoint {
   x: number;
   y: number;
   errY?: number;
+  uncertaintyLabel?: string;
   datasetId: string;
   datasetTitle: string;
   kind: 'individual' | 'replicate_mean';
@@ -206,6 +210,7 @@ export function ScientificFigureCanvas({
   figureConfig,
   experimentId,
   referencePzcMarkers = [],
+  uncertaintyRecords = [],
   comparison,
   comparePlotMode = 'uptake_vs_phf',
   compareShowGroupMeans = false,
@@ -218,6 +223,7 @@ export function ScientificFigureCanvas({
   figureConfig: FigureConfiguration;
   experimentId: string;
   referencePzcMarkers?: ReferencePzcMarker[];
+  uncertaintyRecords?: MeasurementUncertaintyRecord[];
   comparison?: DatasetComparisonSummary | null;
   comparePlotMode?: 'uptake_vs_phf' | 'phf_vs_phi' | 'delta_ph_vs_phi';
   compareShowGroupMeans?: boolean;
@@ -259,7 +265,19 @@ export function ScientificFigureCanvas({
   const isPzcFinal = figureConfig.plotType === 'pzc_final_vs_initial';
   const isPzcDelta = figureConfig.plotType === 'pzc_delta_vs_initial';
   const isDistribution = figureConfig.plotType === 'distribution';
+  const isBoxPlot = figureConfig.plotType === 'box_plot';
   const isComparative = figureConfig.plotType === 'comparative';
+
+  // Map recorded uncertainty by measurementId
+  const uncertaintyByRowId = useMemo(() => {
+    const map = new Map<string, MeasurementUncertaintyRecord>();
+    for (const rec of uncertaintyRecords) {
+      if (rec.uncertaintyValue !== null && rec.uncertaintyValue >= 0) {
+        map.set(rec.measurementId, rec);
+      }
+    }
+    return map;
+  }, [uncertaintyRecords]);
 
   // Build individual points for active dataset
   const individualPlotPoints: PlotPoint[] = useMemo(() => {
@@ -283,9 +301,21 @@ export function ScientificFigureCanvas({
         Number.isFinite(x) &&
         Number.isFinite(y)
       ) {
+        const recUnc = uncertaintyByRowId.get(p.rowId);
+        const errY =
+          figureConfig.errorBarMode === 'recorded_uncertainty' &&
+          recUnc &&
+          recUnc.uncertaintyValue !== null &&
+          recUnc.uncertaintyValue > 0
+            ? recUnc.uncertaintyValue
+            : undefined;
         mapped.push({
           x,
           y,
+          errY,
+          uncertaintyLabel: recUnc
+            ? formatUncertaintyTypeLabel(recUnc.uncertaintyType, recUnc.coverageFactor)
+            : undefined,
           datasetId: dataset.datasetId,
           datasetTitle: dataset.title,
           kind: 'individual',
@@ -303,7 +333,15 @@ export function ScientificFigureCanvas({
     }
     // Strictly sort by X independent variable when drawing connecting lines
     return mapped.sort((a, b) => a.x - b.x);
-  }, [points, isPzcFinal, isPzcDelta, dataset.datasetId, dataset.title]);
+  }, [
+    points,
+    isPzcFinal,
+    isPzcDelta,
+    dataset.datasetId,
+    dataset.title,
+    figureConfig.errorBarMode,
+    uncertaintyByRowId,
+  ]);
 
   // Build explicit replicate group means for active dataset
   const groupMeanPoints: PlotPoint[] = useMemo(() => {
@@ -320,16 +358,31 @@ export function ScientificFigureCanvas({
       if (xStat.mean === null || yStat.mean === null) continue;
       const canErrorBar = yStat.validCount >= 2;
       let errY: number | undefined = undefined;
+      let uncertaintyLabel: string | undefined = undefined;
       if (canErrorBar && figureConfig.errorBarMode === 'sd' && yStat.sampleStdDev !== null) {
         errY = yStat.sampleStdDev;
+        uncertaintyLabel = 'Sample SD (s)';
       } else if (canErrorBar && figureConfig.errorBarMode === 'sem' && yStat.sem !== null) {
         errY = yStat.sem;
+        uncertaintyLabel = 'SEM (s/√n)';
+      } else if (figureConfig.errorBarMode === 'recorded_uncertainty') {
+        const groupRowUnc = g.memberRowIds
+          .map((rowId) => uncertaintyByRowId.get(rowId))
+          .find((u) => u && u.uncertaintyValue !== null && u.uncertaintyValue > 0);
+        if (groupRowUnc && groupRowUnc.uncertaintyValue !== null) {
+          errY = groupRowUnc.uncertaintyValue;
+          uncertaintyLabel = formatUncertaintyTypeLabel(
+            groupRowUnc.uncertaintyType,
+            groupRowUnc.coverageFactor
+          );
+        }
       }
 
       out.push({
         x: xStat.mean,
         y: yStat.mean,
         errY,
+        uncertaintyLabel,
         datasetId: dataset.datasetId,
         datasetTitle: dataset.title,
         kind: 'replicate_mean',
@@ -349,12 +402,35 @@ export function ScientificFigureCanvas({
     figureConfig.errorBarMode,
     dataset.datasetId,
     dataset.title,
+    uncertaintyByRowId,
   ]);
 
   const eligibleErrorBarGroups = useMemo(
-    () => groupMeanPoints.filter((g) => typeof g.errY === 'number' && g.errY > 0).length,
-    [groupMeanPoints]
+    () =>
+      figureConfig.errorBarMode === 'recorded_uncertainty'
+        ? individualPlotPoints.filter((p) => typeof p.errY === 'number' && p.errY > 0).length +
+          groupMeanPoints.filter((g) => typeof g.errY === 'number' && g.errY > 0).length
+        : groupMeanPoints.filter((g) => typeof g.errY === 'number' && g.errY > 0).length,
+    [groupMeanPoints, individualPlotPoints, figureConfig.errorBarMode]
   );
+
+  // Box-plot summary statistics for the primary dependent variable
+  const boxPlotSummary = useMemo(() => {
+    const rawValues =
+      dataset.mode === 'pzc'
+        ? dataset.measurements.map((m) => ({
+            value:
+              m.measuredFinalPh !== null && m.measuredInitialPh !== null
+                ? m.measuredFinalPh - m.measuredInitialPh
+                : null,
+            qualityStatus: m.qualityStatus,
+          }))
+        : dataset.measurements.map((m) => ({
+            value: m.recordedUptakeUmolM2,
+            qualityStatus: m.qualityStatus,
+          }));
+    return computeAdvancedDescriptiveStatistics(rawValues, { excludeFlagged }).value;
+  }, [dataset.mode, dataset.measurements, excludeFlagged]);
 
   // Build comparative multi-dataset series
   const comparativeSeries = useMemo(() => {
@@ -608,7 +684,185 @@ export function ScientificFigureCanvas({
     ? comparativeSeries.some((s) => s.points.length > 0)
     : isDistribution
       ? distributionBins.length > 0
-      : individualPlotPoints.length > 0 || groupMeanPoints.length > 0;
+      : isBoxPlot
+        ? boxPlotSummary.validCount > 0 && boxPlotSummary.boxPlot !== null
+        : individualPlotPoints.length > 0 || groupMeanPoints.length > 0;
+
+  const renderBoxPlotSvg = () => {
+    const bp = boxPlotSummary.boxPlot;
+    if (
+      !bp ||
+      bp.q1 === null ||
+      bp.median === null ||
+      bp.q3 === null ||
+      bp.lowerWhisker === null ||
+      bp.upperWhisker === null
+    ) {
+      return null;
+    }
+    const minVal = boxPlotSummary.min ?? bp.lowerWhisker;
+    const maxVal = boxPlotSummary.max ?? bp.upperWhisker;
+    const span = Math.max(maxVal - minVal, 1e-6);
+    const pad = span * 0.12;
+    const domMin = minVal - pad;
+    const domMax = maxVal + pad;
+    const toX = (val: number) =>
+      90 + ((val - domMin) / Math.max(domMax - domMin, 1e-6)) * 580;
+
+    const xLw = toX(bp.lowerWhisker);
+    const xQ1 = toX(bp.q1);
+    const xMed = toX(bp.median);
+    const xQ3 = toX(bp.q3);
+    const xUw = toX(bp.upperWhisker);
+    const xMean = boxPlotSummary.mean !== null ? toX(boxPlotSummary.mean) : null;
+    const cy = 125;
+    const boxH = 58;
+
+    return (
+      <svg
+        data-figure-canvas="true"
+        viewBox="0 0 740 260"
+        className="w-full h-full select-none"
+      >
+        <rect x="0" y="0" width="740" height="260" fill="#FFFFFF" />
+        {/* Gridlines & Ticks */}
+        {[0, 0.25, 0.5, 0.75, 1].map((t, idx) => {
+          const val = domMin + t * (domMax - domMin);
+          const tx = 90 + t * 580;
+          return (
+            <g key={idx}>
+              {figureConfig.showGridlines && (
+                <line
+                  x1={tx}
+                  y1={40}
+                  x2={tx}
+                  y2={195}
+                  stroke="#E5E7EB"
+                  strokeDasharray="3 3"
+                />
+              )}
+              <line x1={tx} y1={195} x2={tx} y2={201} stroke="#4B5563" />
+              <text
+                x={tx}
+                y={216}
+                textAnchor="middle"
+                fontSize="11"
+                fill="#4B5563"
+                fontFamily="IBM Plex Mono, monospace"
+              >
+                {val.toFixed(precision)}
+              </text>
+            </g>
+          );
+        })}
+        <line x1={90} y1={195} x2={670} y2={195} stroke="#4B5563" strokeWidth="1.2" />
+        <text
+          x={380}
+          y={242}
+          textAnchor="middle"
+          fontSize="12"
+          fontWeight="600"
+          fill="#111827"
+        >
+          {dataset.mode === 'pzc'
+            ? 'Recorded ΔpH (pHf − pHi)'
+            : `${figureConfig.yAxisTitle || 'Recorded Metal Uptake'} (${figureConfig.yAxisUnit || 'µmol/m²'})`}
+        </text>
+
+        {/* Whiskers */}
+        <line
+          x1={xLw}
+          y1={cy}
+          x2={xQ1}
+          y2={cy}
+          stroke={secondaryColor}
+          strokeWidth="1.75"
+        />
+        <line
+          x1={xQ3}
+          y1={cy}
+          x2={xUw}
+          y2={cy}
+          stroke={secondaryColor}
+          strokeWidth="1.75"
+        />
+        <line
+          x1={xLw}
+          y1={cy - 16}
+          x2={xLw}
+          y2={cy + 16}
+          stroke={secondaryColor}
+          strokeWidth="1.75"
+        />
+        <line
+          x1={xUw}
+          y1={cy - 16}
+          x2={xUw}
+          y2={cy + 16}
+          stroke={secondaryColor}
+          strokeWidth="1.75"
+        />
+
+        {/* Interquartile Box (Q1 to Q3) */}
+        <rect
+          x={Math.min(xQ1, xQ3)}
+          y={cy - boxH / 2}
+          width={Math.max(Math.abs(xQ3 - xQ1), 2)}
+          height={boxH}
+          fill={figureConfig.grayscaleMode ? '#F3F4F6' : '#EFF6FF'}
+          stroke={primaryColor}
+          strokeWidth="2"
+        />
+
+        {/* Median (Q2) Line */}
+        <line
+          x1={xMed}
+          y1={cy - boxH / 2}
+          x2={xMed}
+          y2={cy + boxH / 2}
+          stroke={primaryColor}
+          strokeWidth="2.75"
+        />
+
+        {/* Arithmetic Mean Diamond Marker */}
+        {xMean !== null && (
+          <polygon
+            points={`${xMean},${cy - 7} ${xMean + 7},${cy} ${xMean},${cy + 7} ${xMean - 7},${cy}`}
+            fill="#FFFFFF"
+            stroke={secondaryColor}
+            strokeWidth="1.75"
+          />
+        )}
+
+        {/* Flagged outside 1.5*IQR fence values (never auto-removed) */}
+        {bp.outsideFenceValues.map((ov, i) => {
+          const ox = toX(ov);
+          return (
+            <circle
+              key={`out-${i}`}
+              cx={ox}
+              cy={cy}
+              r={4.5}
+              fill="#FFFBEB"
+              stroke="#B45309"
+              strokeWidth="1.75"
+            />
+          );
+        })}
+
+        {/* Summary annotation readout */}
+        <text
+          x={90}
+          y={26}
+          fontSize="11"
+          fill="#374151"
+          fontFamily="IBM Plex Mono, monospace"
+        >
+          {`n=${boxPlotSummary.validCount} · Q1=${bp.q1.toFixed(precision)} · Median=${bp.median.toFixed(precision)} · Q3=${bp.q3.toFixed(precision)} · IQR=${boxPlotSummary.iqr?.toFixed(precision) ?? '—'} · MAD=${boxPlotSummary.mad?.toFixed(precision) ?? '—'} · Outside 1.5×IQR=${bp.outsideFenceCount}`}
+        </text>
+      </svg>
+    );
+  };
 
   const renderLegend = () => {
     if (figureConfig.legendPosition === 'none') return null;
@@ -635,6 +889,21 @@ export function ScientificFigureCanvas({
         </div>
       );
     }
+    if (isBoxPlot) {
+      return (
+        <div className="text-[11px] text-[#4B5563] font-mono">
+          5-Number Quartile Box Plot (Type 7 R-7) · Box: [Q1, Q3] · Center bar: Median (Q2) · Diamond: Mean · Whiskers: 1.5×IQR Tukey fences (flagged points outside fences are never auto-removed).
+        </div>
+      );
+    }
+    const errLabel =
+      figureConfig.errorBarMode === 'recorded_uncertainty'
+        ? '± Recorded Measurement Uncertainty'
+        : figureConfig.errorBarMode === 'sd'
+          ? '± Sample SD (n ≥ 2)'
+          : figureConfig.errorBarMode === 'sem'
+            ? '± SEM (n ≥ 2)'
+            : '';
     return (
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#4B5563]">
         {showIndividual && (
@@ -646,7 +915,12 @@ export function ScientificFigureCanvas({
                 borderColor: primaryColor,
               }}
             />
-            <span>Recorded Observations</span>
+            <span>
+              Recorded Observations
+              {figureConfig.errorBarMode === 'recorded_uncertainty' && !showMeans
+                ? ` (${errLabel})`
+                : ''}
+            </span>
           </span>
         )}
         {showMeans && (
@@ -660,9 +934,7 @@ export function ScientificFigureCanvas({
             />
             <span>
               Replicate Group Means
-              {figureConfig.errorBarMode !== 'none'
-                ? ` (± ${figureConfig.errorBarMode.toUpperCase()}, n ≥ 2)`
-                : ''}
+              {errLabel ? ` (${errLabel})` : ''}
             </span>
           </span>
         )}
@@ -697,7 +969,9 @@ export function ScientificFigureCanvas({
               ? `Multi-dataset comparison (${comparison?.entries.length ?? 0} series) · Exploratory visualization`
               : isDistribution
                 ? 'Descriptive frequency distribution · Missing observations excluded (never coerced to zero)'
-                : `Explicit replicate grouping · ${excludeFlagged ? 'Flagged observations excluded' : 'Flagged observations included (highlighted)'}`}
+                : isBoxPlot
+                  ? 'Non-parametric quartile & 1.5×IQR box-and-whisker summary · Flagged observations outside fences preserved'
+                  : `Explicit replicate grouping · ${excludeFlagged ? 'Flagged observations excluded' : 'Flagged observations included (highlighted)'}`}
           </p>
         </div>
 
@@ -750,6 +1024,10 @@ export function ScientificFigureCanvas({
             Enter numeric measurements in the Measurement Data tab or adjust
             exclusion/comparison settings. Missing cells are never interpolated.
           </p>
+        </div>
+      ) : isBoxPlot ? (
+        <div ref={containerRef} style={{ width: '100%', height: Math.max(height, 260) }}>
+          {renderBoxPlotSvg()}
         </div>
       ) : (
         <div ref={containerRef} style={{ width: '100%', height }}>
@@ -950,6 +1228,12 @@ export function ScientificFigureCanvas({
                         <div className="text-[#4B5563]">
                           Y: {formatScientificNumber(pt.y, precision)}
                         </div>
+                        {typeof pt.errY === 'number' && (
+                          <div className="text-[#0F52BA] mt-0.5">
+                            ± {formatScientificNumber(pt.errY, 3)}{' '}
+                            {pt.uncertaintyLabel ? `(${pt.uncertaintyLabel})` : ''}
+                          </div>
+                        )}
                         {pt.kind === 'replicate_mean' && (
                           <div className="text-[#4B5563] mt-0.5">
                             n={pt.n} · SD={formatScientificNumber(pt.sd ?? null, 3)} · SEM=
@@ -1030,7 +1314,17 @@ export function ScientificFigureCanvas({
                         )}
                         onClick={handlePointClick}
                         isAnimationActive={false}
-                      />
+                      >
+                        {figureConfig.errorBarMode === 'recorded_uncertainty' && (
+                          <ErrorBar
+                            dataKey="errY"
+                            width={5}
+                            strokeWidth={1.3}
+                            stroke={primaryColor}
+                            direction="y"
+                          />
+                        )}
+                      </Scatter>
                     )}
 
                     {showMeans && groupMeanPoints.length > 0 && (
@@ -1085,11 +1379,15 @@ export function ScientificFigureCanvas({
           <span>
             {isComparative
               ? 'Series identities preserved; no cross-dataset regression or pooling applied.'
-              : showMeans && figureConfig.errorBarMode !== 'none'
-                ? `Error bars (± ${figureConfig.errorBarMode.toUpperCase()}) rendered only for explicit groups with n ≥ 2 (${eligibleErrorBarGroups} eligible group${eligibleErrorBarGroups === 1 ? '' : 's'}).`
-                : 'Discrete recorded values plotted without unreviewed isotherm or PZC curve fitting.'}
+              : isBoxPlot
+                ? 'Type 7 (R-7) quartiles and 1.5×IQR Tukey fences; flagged points outside fences are shown visually and never auto-removed.'
+                : figureConfig.errorBarMode === 'recorded_uncertainty'
+                  ? `Recorded measurement uncertainty intervals displayed (${eligibleErrorBarGroups} observation(s) with recorded uncertainty).`
+                  : showMeans && figureConfig.errorBarMode !== 'none'
+                    ? `Error bars (± ${figureConfig.errorBarMode.toUpperCase()}) rendered only for explicit groups with n ≥ 2 (${eligibleErrorBarGroups} eligible group${eligibleErrorBarGroups === 1 ? '' : 's'}).`
+                    : 'Discrete recorded values plotted without unreviewed isotherm or PZC curve fitting.'}
           </span>
-          {onInspectObservation && !isDistribution && (
+          {onInspectObservation && !isDistribution && !isBoxPlot && (
             <span className="font-mono text-[10.5px] text-[#4B5563]">
               Click any data point to inspect record provenance
             </span>

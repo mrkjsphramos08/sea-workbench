@@ -7,35 +7,60 @@ import {
   buildAnalyticalAnalysisProvenance,
   buildAnalyticalSessionComparison,
   buildConsolidatedReviewItems,
+  buildDataDrivenAnalyticalFigureSvg,
+  buildDataDrivenSurveyFigureSvg,
   buildDatasetComparison,
   buildExperimentTimeline,
+  buildResearchMatrixRows,
   buildSurveyAnalysisProvenance,
   buildSurveyChartSeries,
   buildUnifiedSampleRegistry,
+  captureCrossExperimentSnapshotsForReport,
   classifyMeasurementToken,
   compareExperimentSnapshots,
+  computeAdvancedDescriptiveStatistics,
   computeAnalyticalReplicateGroups,
   computeDescriptiveStatistics,
   computeDistributionBins,
+  computeExploratoryCorrelation,
   computeLinearRegression,
+  computePairedDifferences,
+  computeQuantileR7,
+  computeResearchScopeContentHash,
   computeSurveyReplicateGroups,
+  convertToAbsoluteUncertainty,
+  convertToRelativeUncertainty,
   convertUnit,
+  createDefaultResearchScopeFilter,
   createExperimentSnapshotRecord,
   detectAnalyticalQualityIssues,
   evaluateAnalyticalBoundary,
   evaluateAnalyticalSessionOverview,
   evaluateBatchSynthesisBoundary,
+  evaluateCrossExperimentCompatibility,
   evaluateDilutionConsistency,
   evaluateFigureReproducibility,
+  evaluateResearchAnalysisStaleness,
   evaluateSurveyCompleteness,
+  exportResearchMatrixCsv,
+  exportResearchMatrixJson,
+  exportUncertaintyRecordsCsv,
+  filterWorkspaceByResearchScope,
+  formatMatrixCellValue,
   formatQualifiedMeasurementValue,
   formatScientificNumber,
+  formatUncertaintyTypeLabel,
   formatWithScientificNotation,
   hasExperimentChangedSinceSnapshot,
+  isExperimentSyntheticDemo,
   parseOptionalNumber,
+  propagateLinearCombinationUncertainty,
+  propagateMultiplicativeUncertainty,
   recoverResearchTimer,
+  resolveFinalizedReportContext,
   resolveSurveyAnalyticalLinks,
   restoreSnapshotAsIndependentExperiment,
+  searchWorkspaceRecords,
   suggestSurveyAnalyticalMatches,
   verifyAuthoritativeSync,
 } from '../domain/calculations/seaMath';
@@ -101,14 +126,27 @@ import {
   validateAndBuildInstrumentImport,
 } from '../services/import-export/analyticalImport';
 import { buildResearchExportPackage } from '../services/import-export/researchPackage';
-import { listZipEntries } from '../services/import-export/zipArchive';
+import {
+  extractZipEntryBytes,
+  extractZipEntryText,
+  listZipEntries,
+} from '../services/import-export/zipArchive';
+import {
+  alignPairedObservationsById,
+  sanitizeSpreadsheetCell,
+} from '../domain/calculations/researchAnalytics';
 import {
   APP_VERSION,
+  CALC_ENGINE_VERSION,
+  Experiment,
+  FinalizedReport,
   InstrumentMeasurement,
+  MeasurementValueQualifier,
   ResearchTimer,
   SurveyMeasurement,
   WORKSPACE_SCHEMA_VERSION,
 } from '../domain/models/types';
+import { createPrecursorSnapshot } from '../data/demo/demoWorkspace';
 
 class MemoryStorage implements StorageLike {
   private map = new Map<string, string>();
@@ -296,9 +334,9 @@ test('7. JSON backup export/import round-trips cleanly and rejects malformed or 
     false
   );
 
-  // Unsupported future major schema version (6.0.0)
+  // Unsupported future major schema version (7.0.0)
   const badSchema = JSON.parse(exportedJson);
-  badSchema.workspace.schemaVersion = '6.0.0';
+  badSchema.workspace.schemaVersion = '7.0.0';
   const badSchemaResult = validateBackupEnvelope(JSON.stringify(badSchema));
   assert.equal(badSchemaResult.valid, false);
   assert.ok(
@@ -1236,8 +1274,8 @@ test('25. performance benchmark on 100, 500, and 1,000 survey measurement rows c
  * ============================================================================ */
 
 test('26. Phase 4 multi-session architecture ships 2 labeled synthetic sessions, blank creation, and independent deep duplication', () => {
-  assert.equal(APP_VERSION, '0.5.0');
-  assert.equal(WORKSPACE_SCHEMA_VERSION, '5.0.0');
+  assert.equal(APP_VERSION, '1.0.0-rc.2');
+  assert.equal(WORKSPACE_SCHEMA_VERSION, '6.0.0');
 
   const demo = createInitialDemoWorkspace();
   const exp = demo.experiments[0];
@@ -2323,6 +2361,1687 @@ test('48. Phase 4 (v4.0.0) workspace migrates cleanly to v5.0.0, computes UTF-8 
   assert.equal(reloaded.status, 'loaded');
   assert.equal(reloaded.data?.experiments.length, 1);
 });
+
+/* ============================================================================
+ * PHASE 6 TESTS (Tests 49–60) — Advanced Descriptive Statistics, Measurement
+ * Uncertainty, Research Scope Filtering, Cross-Experiment Compatibility,
+ * Research Matrix, Global Search, Staleness Detection, Schema Migration 6.0.0,
+ * Data-Driven SVG Package Export, and 10,000-Record Scalability Benchmarks
+ * ============================================================================ */
+
+test('49. Phase 6 quartiles (Type 7 R-7), IQR, MAD, percentiles, and 1.5*IQR Tukey fences match reference values and never auto-remove outside-fence points', () => {
+  // Known dataset: [10, 12, 14, 15, 16, 18, 20, 22, 55] -> 9 observations with 55 as an outside-fence value
+  const series = [10, 12, 14, 15, 16, 18, 20, 22, 55];
+
+  assert.equal(computeQuantileR7(series, 0.25), 14);
+  assert.equal(computeQuantileR7(series, 0.5), 16);
+  assert.equal(computeQuantileR7(series, 0.75), 20);
+
+  const statsRes = computeAdvancedDescriptiveStatistics(
+    series.map((v) => ({ value: v, qualityStatus: 'valid' as const }))
+  );
+  const stats = statsRes.value;
+
+  assert.equal(stats.validCount, 9);
+  assert.equal(stats.q1, 14);
+  assert.equal(stats.median, 16);
+  assert.equal(stats.q3, 20);
+  assert.equal(stats.iqr, 6);
+  assert.equal(stats.mad, 4);
+  assert.ok(stats.percentiles);
+  assert.equal(stats.percentiles.p25, 14);
+  assert.equal(stats.percentiles.p50, 16);
+  assert.equal(stats.percentiles.p75, 20);
+  assert.ok((stats.percentiles.p95 ?? 0) > 22);
+
+  assert.ok(stats.boxPlot);
+  assert.equal(stats.boxPlot.lowerFence, 5);
+  assert.equal(stats.boxPlot.upperFence, 29);
+  assert.equal(stats.boxPlot.lowerWhisker, 10);
+  assert.equal(stats.boxPlot.upperWhisker, 22);
+  assert.equal(stats.boxPlot.outsideFenceCount, 1);
+  assert.deepEqual(stats.boxPlot.outsideFenceValues, [55]);
+  // Crucial scientific rule: outside-fence observations are flagged visually, NEVER auto-removed from validCount or mean
+  assert.equal(stats.validCount, 9);
+  assert.equal(stats.max, 55);
+});
+
+test('50. Phase 6 paired-observation differences and exploratory Pearson r and Spearman rank rho handle ties, constant series, and n < 3 guardrails', () => {
+  // Paired differences: [10->13 (+3), 20->25 (+5), 30->34 (+4), 40->null (missing)]
+  const pairedRes = computePairedDifferences([
+    { x: 10, y: 13 },
+    { x: 20, y: 25 },
+    { x: 30, y: 34 },
+    { x: 40, y: null },
+  ]);
+  const paired = pairedRes.value;
+  assert.equal(paired.pairCount, 4);
+  assert.equal(paired.validPairCount, 3);
+  assert.equal(paired.missingPairCount, 1);
+  assert.deepEqual(paired.differences, [3, 5, 4]);
+  assert.equal(paired.meanDifference, 4);
+  assert.equal(paired.medianDifference, 4);
+
+  // Exact positive linear correlation -> r = 1, rho = 1
+  const posCorr = computeExploratoryCorrelation([
+    { x: 1, y: 2 },
+    { x: 2, y: 4 },
+    { x: 3, y: 6 },
+    { x: 4, y: 8 },
+  ]);
+  assert.equal(posCorr.status, 'valid');
+  assert.equal(posCorr.value.sampleSize, 4);
+  assert.ok(Math.abs((posCorr.value.pearsonR ?? 0) - 1.0) < 1e-12);
+  assert.ok(Math.abs((posCorr.value.spearmanRho ?? 0) - 1.0) < 1e-12);
+  assert.ok(posCorr.value.interpretationNotice.includes('do not imply'));
+
+  // Monotonic nonlinear with tied ranks -> Spearman rho computed accurately with average-rank tie handling
+  const tiedCorr = computeExploratoryCorrelation([
+    { x: 1, y: 10 },
+    { x: 2, y: 20 },
+    { x: 2, y: 25 },
+    { x: 4, y: 100 },
+  ]);
+  assert.equal(tiedCorr.status, 'valid');
+  assert.equal(tiedCorr.value.hasTiedRanksX, true);
+  assert.ok((tiedCorr.value.spearmanRho ?? 0) > 0.9);
+
+  // Constant series -> zero variance detected cleanly, r and rho are null
+  const constCorr = computeExploratoryCorrelation([
+    { x: 1, y: 5 },
+    { x: 2, y: 5 },
+    { x: 3, y: 5 },
+  ]);
+  assert.equal(constCorr.status, 'not_applicable');
+  assert.equal(constCorr.value.isConstantY, true);
+  assert.equal(constCorr.value.pearsonR, null);
+  assert.equal(constCorr.value.spearmanRho, null);
+
+  // Insufficient sample size (n < 3)
+  const smallCorr = computeExploratoryCorrelation([
+    { x: 1, y: 2 },
+    { x: 2, y: 4 },
+  ]);
+  assert.equal(smallCorr.status, 'insufficient_data');
+  assert.equal(smallCorr.value.pearsonR, null);
+  assert.equal(smallCorr.value.spearmanRho, null);
+});
+
+test('51. Phase 6 advanced statistics exclude missing, qualified (<LOD, <LOQ, ND), and user-excluded records without coercing to zero', () => {
+  const mixedRes = computeAdvancedDescriptiveStatistics(
+    [
+      { value: 0, qualifier: 'numeric', qualityStatus: 'valid' },
+      { value: 2, qualifier: 'numeric', qualityStatus: 'valid' },
+      { value: 4, qualifier: 'numeric', qualityStatus: 'valid' },
+      { value: null, qualifier: 'below_lod', qualityStatus: 'valid' },
+      { value: null, qualifier: 'below_loq', qualityStatus: 'valid' },
+      { value: null, qualifier: 'not_detected', qualityStatus: 'valid' },
+      { value: null, qualifier: 'missing', qualityStatus: 'valid' },
+      { value: 99, qualifier: 'numeric', qualityStatus: 'excluded_by_user' },
+      { value: 50, qualifier: 'numeric', qualityStatus: 'flagged' },
+    ],
+    { excludeFlagged: true }
+  );
+  const mixed = mixedRes.value;
+
+  // Only [0, 2, 4] are included when excludeFlagged=true; 0 is preserved as a valid zero!
+  assert.equal(mixed.validCount, 3);
+  assert.equal(mixed.missingOrNullCount, 4);
+  assert.equal(mixed.excludedCount, 2); // 1 excluded_by_user + 1 flagged excluded
+  assert.equal(mixed.flaggedCount, 1);
+  assert.equal(mixed.mean, 2);
+  assert.equal(mixed.median, 2);
+  assert.equal(mixed.min, 0);
+});
+
+test('52. Phase 6 measurement uncertainty records preserve distinct uncertainty types and convert between absolute and relative', () => {
+  const demo = createInitialDemoWorkspace();
+  const exp = demo.experiments[0];
+
+  assert.ok((exp.uncertaintyRecords ?? []).length >= 3);
+  const types = new Set((exp.uncertaintyRecords ?? []).map((r) => r.uncertaintyType));
+  assert.ok(types.has('standard_uncertainty'));
+  assert.ok(types.has('expanded_uncertainty'));
+  assert.ok(types.has('manufacturer_reported'));
+
+  assert.equal(
+    formatUncertaintyTypeLabel('expanded_uncertainty', 2),
+    'Expanded Uncertainty (U = k·u_c, k=2)'
+  );
+  assert.equal(formatUncertaintyTypeLabel('sample_sd'), 'Sample Standard Deviation (SD)');
+  assert.equal(formatUncertaintyTypeLabel('sem'), 'Standard Error of the Mean (SEM)');
+
+  // Relative <-> absolute conversion (convertToRelativeUncertainty returns u/|x| fraction)
+  const rel = convertToRelativeUncertainty(200, 1.5);
+  assert.ok(Math.abs((rel ?? 0) - 0.0075) < 1e-12);
+  const abs = convertToAbsoluteUncertainty(200, 0.0075);
+  assert.ok(Math.abs((abs ?? 0) - 1.5) < 1e-12);
+  assert.equal(convertToRelativeUncertainty(0, 1.5), null);
+  assert.equal(convertToAbsoluteUncertainty(100, -1), null);
+
+  const csv = exportUncertaintyRecordsCsv(exp.uncertaintyRecords ?? []);
+  assert.ok(csv.includes('uncertaintyType'));
+  assert.ok(csv.includes('expanded_uncertainty'));
+});
+
+test('53. Phase 6 mathematical uncertainty propagation computes linear and multiplicative combined & expanded uncertainties and rejects invalid inputs', () => {
+  const termC0 = {
+    id: 'c0',
+    label: 'C0',
+    symbol: 'C_0',
+    value: 200.2,
+    unit: 'ppm',
+    standardUncertainty: 0.6,
+    uncertaintyType: 'standard_uncertainty' as const,
+    coefficientOrExponent: 1,
+    sourceNote: 'ICP calibration',
+  };
+  const termCf = {
+    id: 'cf',
+    label: 'Cf',
+    symbol: 'C_f',
+    value: 94.6,
+    unit: 'ppm',
+    standardUncertainty: 0.8,
+    uncertaintyType: 'standard_uncertainty' as const,
+    coefficientOrExponent: -1,
+    sourceNote: 'ICP filtrate',
+  };
+
+  // 1. Linear combination: y = 1*200.2 - 1*94.6 = 105.6 with u1=0.6, u2=0.8 (independent) -> u_c = sqrt(0.36 + 0.64) = 1.0
+  const lin = propagateLinearCombinationUncertainty([termC0, termCf], [], {
+    coverageFactor: 2,
+    unit: 'ppm',
+  });
+  assert.equal(lin.status, 'valid');
+  assert.ok(Math.abs((lin.value?.combinedValue ?? 0) - 105.6) < 1e-12);
+  assert.ok(Math.abs((lin.value?.combinedStandardUncertainty ?? 0) - 1.0) < 1e-12);
+  assert.ok(Math.abs((lin.value?.expandedUncertainty ?? 0) - 2.0) < 1e-12);
+
+  // Correlated linear combination: r_12 = +0.5 -> u_c^2 = 0.36 + 0.64 + 2*(1)*(-1)*(0.5)*(0.6)*(0.8) = 1.0 - 0.48 = 0.52
+  const linCorr = propagateLinearCombinationUncertainty(
+    [termC0, termCf],
+    [{ termIdA: 'c0', termIdB: 'cf', correlationCoefficient: 0.5 }],
+    { coverageFactor: 2, unit: 'ppm' }
+  );
+  assert.equal(linCorr.status, 'valid');
+  assert.ok(
+    Math.abs((linCorr.value?.combinedStandardUncertainty ?? 0) - Math.sqrt(0.52)) < 1e-12
+  );
+
+  // 2. Multiplicative combination: y = 1 * A^1 * B^-1 with A=100 (u=3, 3%), B=50 (u=2, 4%) -> y=2, rel u = sqrt(0.03^2 + 0.04^2) = 0.05 -> u_c = 0.1
+  const mult = propagateMultiplicativeUncertainty(
+    1,
+    [
+      {
+        id: 'A',
+        label: 'Mass',
+        symbol: 'm',
+        value: 100,
+        unit: 'mg',
+        standardUncertainty: 3,
+        uncertaintyType: 'standard_uncertainty',
+        coefficientOrExponent: 1,
+        sourceNote: 'Balance',
+      },
+      {
+        id: 'B',
+        label: 'Volume',
+        symbol: 'V',
+        value: 50,
+        unit: 'mL',
+        standardUncertainty: 2,
+        uncertaintyType: 'standard_uncertainty',
+        coefficientOrExponent: -1,
+        sourceNote: 'Pipette',
+      },
+    ],
+    [],
+    { coverageFactor: 2, unit: 'mg/mL' }
+  );
+  assert.equal(mult.status, 'valid');
+  assert.ok(Math.abs((mult.value?.combinedValue ?? 0) - 2.0) < 1e-12);
+  assert.ok(Math.abs((mult.value?.relativeStandardUncertainty ?? 0) - 0.05) < 1e-12);
+  assert.ok(Math.abs((mult.value?.combinedStandardUncertainty ?? 0) - 0.1) < 1e-12);
+  assert.ok(Math.abs((mult.value?.expandedUncertainty ?? 0) - 0.2) < 1e-12);
+
+  // Invalid negative uncertainty rejected cleanly
+  const negUnc = propagateLinearCombinationUncertainty([
+    {
+      ...termC0,
+      id: 'x1',
+      standardUncertainty: -0.5,
+    },
+  ]);
+  assert.equal(negUnc.status, 'invalid_input');
+
+  // Zero value in multiplicative ratio rejected cleanly
+  const zeroMult = propagateMultiplicativeUncertainty(1, [
+    {
+      ...termC0,
+      id: 'z1',
+      value: 0,
+      standardUncertainty: 0.1,
+    },
+  ]);
+  assert.equal(zeroMult.status, 'invalid_input');
+});
+
+test('54. Phase 6 Research Scope filter excludes synthetic demonstration records by default and includes them when toggled', () => {
+  const demo = createInitialDemoWorkspace();
+  const realExp = createBlankExperiment({
+    experimentId: 'SEA-REAL-101',
+    title: 'Real Laboratory Pt/SiO2 Experiment',
+    projectId: demo.projects[0].id,
+    researcher: 'Dr. E. Vance',
+    type: 'Uptake Survey',
+  });
+  demo.experiments.push(realExp);
+
+  // Default filter has includeSyntheticDemo = false
+  const defaultScope = createDefaultResearchScopeFilter();
+  assert.equal(defaultScope.includeSyntheticDemo, false);
+
+  const filteredDefault = filterWorkspaceByResearchScope(demo, defaultScope);
+  assert.ok(
+    filteredDefault.filteredExperiments.every((e) => !isExperimentSyntheticDemo(e)),
+    'Default scope must exclude all synthetic demonstration experiments'
+  );
+  assert.ok(
+    filteredDefault.filteredExperiments.some((e) => e.experimentId === 'SEA-REAL-101')
+  );
+  assert.equal(filteredDefault.containsSynthetic, false);
+
+  // Toggling includeSyntheticDemo = true includes demonstration fixtures with explicit synthetic flag
+  const withDemo = filterWorkspaceByResearchScope(demo, {
+    ...defaultScope,
+    includeSyntheticDemo: true,
+  });
+  assert.ok(
+    withDemo.filteredExperiments.some((e) => e.experimentId === 'SEA-DEMO-001')
+  );
+  assert.equal(withDemo.containsSynthetic, true);
+});
+
+test('55. Phase 6 cross-experiment compatibility evaluator detects condition differences and blocks incompatible units or distinct analytes', () => {
+  const demo = createInitialDemoWorkspace();
+
+  // Compatible comparison across survey datasets
+  const compat = evaluateCrossExperimentCompatibility(
+    demo,
+    { ...createDefaultResearchScopeFilter(), includeSyntheticDemo: true },
+    'uptake_umol_m2'
+  );
+  assert.equal(compat.isNumericallyCompatibleForAggregation, true);
+  assert.equal(compat.incompatibilityReasons.length, 0);
+  assert.ok(compat.warnings.length >= 1);
+
+  // Analytical comparison across sessions with multiple analytes (Pt and Cu across demo experiments) -> blocked!
+  const multiAnalyteBlock = evaluateCrossExperimentCompatibility(
+    demo,
+    { ...createDefaultResearchScopeFilter(), includeSyntheticDemo: true },
+    'reported_conc'
+  );
+  assert.equal(multiAnalyteBlock.isNumericallyCompatibleForAggregation, false);
+  assert.ok(
+    multiAnalyteBlock.incompatibilityReasons.some((r: string) =>
+      r.includes('Multiple distinct analytes')
+    )
+  );
+
+  // Filtering to a single analytical session with one analyte resolves the analyte block
+  const singleSessionScope = {
+    ...createDefaultResearchScopeFilter(),
+    includeSyntheticDemo: true,
+    mode: 'selected_analytical_sessions' as const,
+    analyticalSessionIds: [demo.experiments[0].analyticalSessions[0].id],
+  };
+  const singleAnalyteOk = evaluateCrossExperimentCompatibility(
+    demo,
+    singleSessionScope,
+    'reported_conc'
+  );
+  assert.equal(singleAnalyteOk.isNumericallyCompatibleForAggregation, true);
+});
+
+test('56. Phase 6 Research Comparison Matrix generates rows at all 3 granularities and exports traceable CSV and JSON', () => {
+  const demo = createInitialDemoWorkspace();
+  const scope = {
+    ...createDefaultResearchScopeFilter(),
+    includeSyntheticDemo: true,
+  };
+
+  const expRows = buildResearchMatrixRows(demo, scope, 'experiment');
+  const dsRows = buildResearchMatrixRows(demo, scope, 'survey_dataset');
+  const sessRows = buildResearchMatrixRows(demo, scope, 'analytical_session');
+
+  assert.ok(expRows.length >= 2);
+  assert.ok(dsRows.length >= 3);
+  assert.ok(sessRows.length >= 2);
+
+  const mtxConfig = (demo.researchMatrixConfigs ?? [])[0];
+  assert.ok(mtxConfig);
+
+  const csv = exportResearchMatrixCsv(dsRows, mtxConfig.columns);
+  assert.ok(csv.includes('Record ID'));
+  assert.ok(csv.includes('DS-UPT-01'));
+  assert.ok(csv.includes('IQR (Q3−Q1)'));
+
+  const json = exportResearchMatrixJson(dsRows, mtxConfig.columns, mtxConfig);
+  const parsed = JSON.parse(json);
+  assert.equal(parsed.rowCount, dsRows.length);
+  assert.ok(Array.isArray(parsed.rows));
+  assert.equal(formatMatrixCellValue(dsRows[0], 'recordId'), dsRows[0].recordId);
+});
+
+test('57. Phase 6 workspace-wide search indexes all entity categories and respects synthetic demo filtering', () => {
+  const demo = createInitialDemoWorkspace();
+
+  // Search for 'Chloroplatinic' (precursor)
+  const precursorHits = searchWorkspaceRecords(demo, 'Chloroplatinic', {
+    includeSyntheticDemo: true,
+  });
+  assert.ok(precursorHits.some((h) => h.category === 'precursor'));
+
+  // Search for 'UPT-04' (sample + analytical measurement)
+  const sampleHits = searchWorkspaceRecords(demo, 'UPT-04', {
+    includeSyntheticDemo: true,
+  });
+  assert.ok(sampleHits.some((h) => h.category === 'sample'));
+  assert.ok(sampleHits.some((h) => h.category === 'measurement'));
+
+  // Search for 'Certificate of Analysis' (scientific reference)
+  const refHits = searchWorkspaceRecords(demo, 'Certificate of Analysis', {
+    includeSyntheticDemo: true,
+  });
+  assert.ok(refHits.some((h) => h.category === 'reference'));
+
+  // Search for 'SNAP-DEMO' (snapshot) and finalized report
+  const snapHits = searchWorkspaceRecords(demo, 'SNAP-DEMO', {
+    includeSyntheticDemo: true,
+  });
+  assert.ok(snapHits.some((h) => h.category === 'snapshot'));
+
+  const reportHits = searchWorkspaceRecords(demo, 'Complete Research Report', {
+    includeSyntheticDemo: true,
+  });
+  assert.ok(reportHits.some((h) => h.category === 'report'));
+});
+
+test('58. Phase 6 saved analysis configuration and snapshot staleness detection transition from saved_current to requires_regeneration and source_unavailable', () => {
+  const demo = createInitialDemoWorkspace();
+  const snap = (demo.researchAnalysisSnapshots ?? [])[0];
+  assert.ok(snap);
+
+  const currentHash = computeResearchScopeContentHash(demo, snap.scope);
+  const freshSnap = { ...snap, sourceContentHash: currentHash };
+
+  const okState = evaluateResearchAnalysisStaleness(demo, {
+    scope: freshSnap.scope,
+    sourceContentHash: freshSnap.sourceContentHash,
+    includedExperimentUuids: freshSnap.includedExperimentUuids,
+    includedSurveyDatasetIds: freshSnap.includedSurveyDatasetIds,
+    includedAnalyticalSessionIds: freshSnap.includedAnalyticalSessionIds,
+  });
+  assert.equal(okState.status, 'saved_current');
+
+  // Mutate a survey measurement in the workspace -> must transition to requires_regeneration
+  const mutated = structuredClone(demo);
+  mutated.experiments[0].surveyDatasets[0].measurements[0].recordedUptakeUmolM2 = 7.77;
+  const staleState = evaluateResearchAnalysisStaleness(mutated, {
+    scope: freshSnap.scope,
+    sourceContentHash: freshSnap.sourceContentHash,
+    includedExperimentUuids: freshSnap.includedExperimentUuids,
+    includedSurveyDatasetIds: freshSnap.includedSurveyDatasetIds,
+    includedAnalyticalSessionIds: freshSnap.includedAnalyticalSessionIds,
+  });
+  assert.equal(staleState.status, 'requires_regeneration');
+
+  // Delete a referenced dataset -> must transition to source_unavailable
+  const deletedDs = structuredClone(demo);
+  deletedDs.experiments[0].surveyDatasets = deletedDs.experiments[0].surveyDatasets.slice(1);
+  const unavailState = evaluateResearchAnalysisStaleness(deletedDs, {
+    scope: freshSnap.scope,
+    sourceContentHash: freshSnap.sourceContentHash,
+    includedExperimentUuids: freshSnap.includedExperimentUuids,
+    includedSurveyDatasetIds: freshSnap.includedSurveyDatasetIds,
+    includedAnalyticalSessionIds: freshSnap.includedAnalyticalSessionIds,
+  });
+  assert.equal(unavailState.status, 'source_unavailable');
+  assert.ok(unavailState.reason.includes('deleted or is unavailable'));
+});
+
+test('59. Phase 5 (v5.0.0) workspace migrates to v6.0.0 and Phase 6 ZIP export package contains data-driven SVG plots and advanced analytics files', () => {
+  const demo = createInitialDemoWorkspace();
+  const exp = demo.experiments[0];
+
+  // Simulate a Phase 5 (5.0.0) workspace without Phase 6 fields
+  const v5Exp = { ...exp } as Record<string, unknown>;
+  delete v5Exp.uncertaintyRecords;
+  v5Exp.dataVersion = '5.0.0';
+
+  const v5Workspace = {
+    ...demo,
+    schemaVersion: '5.0.0',
+    appVersion: '0.5.0',
+    experiments: [v5Exp],
+  } as Record<string, unknown>;
+  delete v5Workspace.researchComparisonConfigs;
+  delete v5Workspace.researchMatrixConfigs;
+  delete v5Workspace.researchAnalysisSnapshots;
+
+  const migrated = migrateWorkspaceToCurrentSchema(v5Workspace);
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.migrated, true);
+  assert.equal(migrated.fromVersion, '5.0.0');
+  assert.equal(migrated.data?.schemaVersion, '6.0.0');
+  assert.equal(migrated.data?.appVersion, APP_VERSION);
+  assert.ok(Array.isArray(migrated.data?.experiments[0].uncertaintyRecords));
+  assert.ok(Array.isArray(migrated.data?.researchComparisonConfigs));
+  assert.ok(Array.isArray(migrated.data?.researchMatrixConfigs));
+  assert.ok(Array.isArray(migrated.data?.researchAnalysisSnapshots));
+
+  // Verify data-driven SVG plot generators produce plotted coordinate geometry (<circle, <line, <rect)
+  const surveySvg = buildDataDrivenSurveyFigureSvg(
+    exp,
+    exp.surveyDatasets[0],
+    exp.surveyDatasets[0].figureConfig
+  );
+  assert.ok(surveySvg.includes('<svg'));
+  assert.ok(surveySvg.includes('<circle'));
+  assert.ok(surveySvg.includes('DS-UPT-01'));
+
+  const analyticalSvg = buildDataDrivenAnalyticalFigureSvg(
+    exp,
+    exp.analyticalSessions[0],
+    exp.analyticalSessions[0].figureConfig
+  );
+  assert.ok(analyticalSvg.includes('<svg'));
+  assert.ok(analyticalSvg.includes('<circle'));
+  assert.ok(analyticalSvg.includes('ANA-ICP-01'));
+
+  // Verify ZIP package includes Phase 6 analytics files and data-driven SVG figures
+  const pkg = buildResearchExportPackage(exp);
+  const paths = listZipEntries(pkg.zipBytes).map((e) => e.path);
+  assert.ok(paths.includes('analytics/advanced_descriptive_statistics.csv'));
+  assert.ok(paths.includes('analytics/uncertainty_records.csv'));
+  assert.ok(paths.includes('analytics/uncertainty_records.json'));
+  const figEntry = pkg.entries.find(
+    (e) => e.path.startsWith('figures/') && e.path.endsWith('.svg')
+  );
+  assert.ok(figEntry);
+});
+
+test('60. Phase 6 scalability benchmark across 100, 1,000, 5,000, and 10,000 records completes advanced statistics, search, and matrix generation within interactive bounds', () => {
+  const sizes = [100, 1000, 5000, 10000] as const;
+  const benchmarkResults: Array<{
+    records: number;
+    advancedStatsMs: number;
+    correlationMs: number;
+    uncertaintyPropMs: number;
+    matrixBuildMs: number;
+    globalSearchMs: number;
+  }> = [];
+
+  const demo = createInitialDemoWorkspace();
+
+  for (const n of sizes) {
+    const obs = Array.from({ length: n }, (_, i) => ({
+      value: 0.5 + (i % 250) * 0.02 + (i % 7) * 0.005,
+      qualityStatus: (i % 50 === 0 ? 'flagged' : 'valid') as 'valid' | 'flagged',
+    }));
+    const pairs = Array.from({ length: n }, (_, i) => ({
+      x: 2.0 + (i % 100) * 0.1,
+      y: 0.4 + (i % 100) * 0.015 + (i % 5) * 0.01,
+    }));
+
+    const t0 = performance.now();
+    const adv = computeAdvancedDescriptiveStatistics(obs, { excludeFlagged: false });
+    const t1 = performance.now();
+    assert.equal(adv.value.validCount, n);
+    assert.ok(
+      adv.value.q1 !== null && adv.value.q3 !== null && adv.value.mad !== null
+    );
+
+    const t2 = performance.now();
+    const corr = computeExploratoryCorrelation(pairs);
+    const t3 = performance.now();
+    assert.equal(corr.value.sampleSize, n);
+    assert.ok(corr.value.pearsonR !== null && corr.value.spearmanRho !== null);
+
+    const t4 = performance.now();
+    for (let k = 0; k < 100; k += 1) {
+      propagateLinearCombinationUncertainty([
+        {
+          id: 'a',
+          label: 'A',
+          symbol: 'A',
+          value: 200 + k,
+          unit: 'ppm',
+          standardUncertainty: 0.5,
+          uncertaintyType: 'standard_uncertainty',
+          coefficientOrExponent: 1,
+          sourceNote: 'bench',
+        },
+        {
+          id: 'b',
+          label: 'B',
+          symbol: 'B',
+          value: 95 + k * 0.2,
+          unit: 'ppm',
+          standardUncertainty: 0.3,
+          uncertaintyType: 'standard_uncertainty',
+          coefficientOrExponent: -1,
+          sourceNote: 'bench',
+        },
+      ]);
+    }
+    const t5 = performance.now();
+
+    const t6 = performance.now();
+    const matrixRows = buildResearchMatrixRows(
+      demo,
+      { ...createDefaultResearchScopeFilter(), includeSyntheticDemo: true },
+      'survey_dataset'
+    );
+    const t7 = performance.now();
+    assert.ok(matrixRows.length >= 3);
+
+    const t8 = performance.now();
+    const hits = searchWorkspaceRecords(demo, 'Pt', {
+      includeSyntheticDemo: true,
+      limit: 100,
+    });
+    const t9 = performance.now();
+    assert.ok(hits.length > 0);
+
+    benchmarkResults.push({
+      records: n,
+      advancedStatsMs: Number((t1 - t0).toFixed(2)),
+      correlationMs: Number((t3 - t2).toFixed(2)),
+      uncertaintyPropMs: Number((t5 - t4).toFixed(2)),
+      matrixBuildMs: Number((t7 - t6).toFixed(2)),
+      globalSearchMs: Number((t9 - t8).toFixed(2)),
+    });
+  }
+
+  console.log('PHASE6_BENCHMARK_RESULTS:', JSON.stringify(benchmarkResults));
+  const r10k = benchmarkResults[benchmarkResults.length - 1];
+  assert.ok(
+    r10k.advancedStatsMs < 500,
+    `10,000-record advanced statistics took ${r10k.advancedStatsMs}ms`
+  );
+  assert.ok(
+    r10k.correlationMs < 500,
+    `10,000-record Pearson/Spearman correlation took ${r10k.correlationMs}ms`
+  );
+});
+
+/* ============================================================================
+ * PHASE 7 FINAL VERIFICATION, NUMERICAL REFERENCE & RELEASE READINESS TESTS
+ * ============================================================================ */
+
+test('61. Phase 7 independent mathematical reference fixtures verify descriptive stats, Type 7 quartiles/IQR/MAD, OLS regression, ID-paired differences, correlation, and uncertainty propagation', () => {
+  // 1. Independent reference dataset: [10, 12, 14, 18, 26]
+  // Exact manual calculation:
+  // n = 5, sum = 80, mean = 16.0
+  // deviations from 16: [-6, -4, -2, +2, +10] -> sq = [36, 16, 4, 4, 100] -> sumSq = 160
+  // sample variance s^2 = 160 / 4 = 40 -> s = sqrt(40) = 6.324555320336759
+  // SEM = sqrt(40) / sqrt(5) = sqrt(8) = 2.8284271247461903
+  // %RSD = (sqrt(40) / 16) * 100 = 39.528470752104744%
+  // Type 7 (R-7) quartiles for n=5: h(0.25) = 0.25*4 + 1 = 2 -> Q1 = 12; h(0.5) = 3 -> Median = 14; h(0.75) = 4 -> Q3 = 18
+  // IQR = 18 - 12 = 6; Tukey fences: lower = 12 - 9 = 3, upper = 18 + 9 = 27
+  // |x_i - median(14)| = [4, 2, 0, 4, 12] -> sorted [0, 2, 4, 4, 12] -> MAD = 4.0
+  const refValues = [10, 12, 14, 18, 26];
+  const refObs = refValues.map((v) => ({
+    value: v,
+    qualityStatus: 'valid' as const,
+  }));
+
+  const basic = computeDescriptiveStatistics(refValues, { unit: 'µmol/m²' });
+  assert.equal(basic.status, 'available');
+  assert.equal(basic.value.validCount, 5);
+  assert.ok(Math.abs((basic.value.mean ?? 0) - 16.0) < 1e-12);
+  assert.ok(Math.abs((basic.value.sampleVariance ?? 0) - 40.0) < 1e-12);
+  assert.ok(Math.abs((basic.value.sampleStdDev ?? 0) - Math.sqrt(40)) < 1e-12);
+  assert.ok(Math.abs((basic.value.sem ?? 0) - Math.sqrt(8)) < 1e-12);
+  assert.ok(
+    Math.abs((basic.value.rsdPercent ?? 0) - (Math.sqrt(40) / 16) * 100) < 1e-12
+  );
+
+  const adv = computeAdvancedDescriptiveStatistics(refObs);
+  assert.equal(adv.status, 'available');
+  assert.equal(adv.value.q1, 12);
+  assert.equal(adv.value.median, 14);
+  assert.equal(adv.value.q3, 18);
+  assert.equal(adv.value.iqr, 6);
+  assert.equal(adv.value.mad, 4);
+  assert.equal(adv.value.boxPlotSummary.lowerFence, 3);
+  assert.equal(adv.value.boxPlotSummary.upperFence, 27);
+  assert.equal(adv.value.boxPlotSummary.outsideFenceValues.length, 0);
+
+  // Even-sized Type 7 quantile interpolation check: [2, 4, 7, 10, 15, 22] (n = 6)
+  const evenSorted = [2, 4, 7, 10, 15, 22];
+  assert.ok(Math.abs((computeQuantileR7(evenSorted, 0.25) ?? 0) - 4.75) < 1e-12);
+  assert.ok(Math.abs((computeQuantileR7(evenSorted, 0.5) ?? 0) - 8.5) < 1e-12);
+  assert.ok(Math.abs((computeQuantileR7(evenSorted, 0.75) ?? 0) - 13.75) < 1e-12);
+
+  // 2. OLS Regression reference check: points (1, 2.5), (2, 4.0), (3, 6.5), (4, 8.0), (5, 10.5)
+  // slope m = 2.0, intercept b = 0.3, SSE = 0.30, SSR = 40.00, SST = 40.30, R^2 = 40.00 / 40.30, standardErrorOfEstimate = sqrt(0.10)
+  const ols = computeLinearRegression(
+    [
+      { id: 'p1', label: 'P1', x: 1, y: 2.5 },
+      { id: 'p2', label: 'P2', x: 2, y: 4.0 },
+      { id: 'p3', label: 'P3', x: 3, y: 6.5 },
+      { id: 'p4', label: 'P4', x: 4, y: 8.0 },
+      { id: 'p5', label: 'P5', x: 5, y: 10.5 },
+    ],
+    { xUnit: 'ppm', yUnit: 'cps' }
+  );
+  assert.equal(ols.status, 'available');
+  assert.ok(Math.abs((ols.value.slope ?? 0) - 2.0) < 1e-12);
+  assert.ok(Math.abs((ols.value.intercept ?? 0) - 0.3) < 1e-12);
+  assert.ok(Math.abs((ols.value.rSquared ?? 0) - 40.0 / 40.3) < 1e-12);
+  assert.ok(
+    Math.abs((ols.value.standardErrorOfEstimate ?? 0) - Math.sqrt(0.1)) < 1e-12
+  );
+
+  // 3. Explicit ID alignment for paired differences and correlation (shuffled order + missing counterpart)
+  const seriesX = [
+    { id: 'S-01', value: 10 },
+    { id: 'S-02', value: 20 },
+    { id: 'S-03', value: 30 },
+    { id: 'S-04-unmatched', value: 40 },
+  ];
+  const seriesY = [
+    { id: 'S-03', value: 33 },
+    { id: 'S-01', value: 11 },
+    { id: 'S-02', value: 23 },
+    { id: 'S-05-missing-x', value: 50 },
+  ];
+  const aligned = alignPairedObservationsById(seriesX, seriesY);
+  const pairedDiff = computePairedDifferences(aligned, { unit: 'ppm' });
+  assert.equal(pairedDiff.status, 'valid');
+  assert.equal(pairedDiff.value.validPairCount, 3);
+  assert.equal(pairedDiff.value.missingPairCount, 2);
+  // Differences (y - x) for S-01, S-02, S-03 are [1, 3, 3] -> meanDiff = 7/3, medianDiff = 3
+  assert.ok(Math.abs((pairedDiff.value.meanDifference ?? 0) - 7 / 3) < 1e-12);
+  assert.equal(pairedDiff.value.medianDifference, 3);
+  assert.deepEqual(pairedDiff.inputRefs, ['S-01', 'S-02', 'S-03']);
+  assert.ok(pairedDiff.excludedInputRefs?.includes('S-04-unmatched'));
+  assert.ok(pairedDiff.excludedInputRefs?.includes('S-05-missing-x'));
+
+  // 4. Negative correlation in linear uncertainty propagation: Y = X1 + X2 with u1=3, u2=4, r12 = -0.5
+  // u_c^2 = 3^2 + 4^2 + 2*(1)*(1)*(-0.5)*3*4 = 9 + 16 - 12 = 13 -> u_c = sqrt(13)
+  const negCorrProp = propagateLinearCombinationUncertainty(
+    [
+      {
+        id: 't1',
+        label: 'Term 1',
+        symbol: 'X1',
+        value: 50,
+        unit: 'ppm',
+        standardUncertainty: 3,
+        uncertaintyType: 'standard_uncertainty',
+        coefficientOrExponent: 1,
+        sourceNote: 'Ref',
+      },
+      {
+        id: 't2',
+        label: 'Term 2',
+        symbol: 'X2',
+        value: 25,
+        unit: 'ppm',
+        standardUncertainty: 4,
+        uncertaintyType: 'standard_uncertainty',
+        coefficientOrExponent: 1,
+        sourceNote: 'Ref',
+      },
+    ],
+    [{ termIdA: 't1', termIdB: 't2', correlationCoefficient: -0.5 }],
+    { coverageFactor: 2, unit: 'ppm' }
+  );
+  assert.equal(negCorrProp.status, 'valid');
+  assert.ok(
+    Math.abs((negCorrProp.value?.combinedStandardUncertainty ?? 0) - Math.sqrt(13)) < 1e-12
+  );
+});
+
+test('62. Phase 7 numerical edge cases handle empty, single-value, zero, negative, extreme magnitudes, and reject NaN/Infinity or incompatible units cleanly', () => {
+  // Empty dataset
+  const emptyStats = computeAdvancedDescriptiveStatistics([]);
+  assert.equal(emptyStats.status, 'insufficient_data');
+  assert.equal(emptyStats.value.validCount, 0);
+  assert.equal(emptyStats.value.mean, null);
+
+  // Single observation (n = 1): mean & median exist, sampleStdDev & SEM must be null
+  const singleStats = computeAdvancedDescriptiveStatistics([
+    { value: 4.25, qualityStatus: 'valid' },
+  ]);
+  assert.equal(singleStats.status, 'available');
+  assert.equal(singleStats.value.validCount, 1);
+  assert.equal(singleStats.value.mean, 4.25);
+  assert.equal(singleStats.value.median, 4.25);
+  assert.equal(singleStats.value.sampleStdDev, null);
+  assert.equal(singleStats.value.sem, null);
+
+  // Valid zero (0.0) and negative values (-2.5, 0.0, +2.5) -> mean = 0, %RSD must be null (division-by-zero guard)
+  const zeroMeanStats = computeDescriptiveStatistics([-2.5, 0.0, 2.5], {
+    unit: 'ΔpH',
+  });
+  assert.equal(zeroMeanStats.status, 'available');
+  assert.equal(zeroMeanStats.value.validCount, 3);
+  assert.equal(zeroMeanStats.value.mean, 0);
+  assert.equal(zeroMeanStats.value.rsdPercent, null);
+
+  // Extreme small (1e-9) and large (1e9) finite values
+  const smallStats = computeDescriptiveStatistics([1e-9, 2e-9, 3e-9], {
+    unit: 'mol/L',
+  });
+  assert.equal(smallStats.status, 'available');
+  assert.ok(Math.abs((smallStats.value.mean ?? 0) - 2e-9) < 1e-20);
+
+  const largeStats = computeDescriptiveStatistics([1e9, 2e9, 3e9], {
+    unit: 'cps',
+  });
+  assert.equal(largeStats.status, 'available');
+  assert.ok(Math.abs((largeStats.value.mean ?? 0) - 2e9) < 1e-3);
+
+  // NaN and Infinity are excluded from calculations and never corrupt results
+  const withNonFinite = computeDescriptiveStatistics(
+    [5.0, Number.NaN, Number.POSITIVE_INFINITY, 7.0],
+    { unit: 'ppm' }
+  );
+  assert.equal(withNonFinite.value.validCount, 2);
+  assert.equal(withNonFinite.value.mean, 6.0);
+  assert.equal(withNonFinite.value.invalidCount, 2);
+
+  // Degenerate regression cases: 2 points (standardErrorOfEstimate = null), constant y (slope = 0, rSquared = null)
+  const twoPt = computeLinearRegression(
+    [
+      { id: '1', label: '1', x: 1, y: 3 },
+      { id: '2', label: '2', x: 3, y: 7 },
+    ],
+    { xUnit: 'ppm', yUnit: 'cps' }
+  );
+  assert.equal(twoPt.status, 'available');
+  assert.equal(twoPt.value.slope, 2);
+  assert.equal(twoPt.value.standardErrorOfEstimate, null);
+
+  const constY = computeLinearRegression(
+    [
+      { id: '1', label: '1', x: 1, y: 5 },
+      { id: '2', label: '2', x: 2, y: 5 },
+      { id: '3', label: '3', x: 3, y: 5 },
+    ],
+    { xUnit: 'ppm', yUnit: 'cps' }
+  );
+  assert.equal(constY.value.slope, 0);
+  assert.equal(constY.value.rSquared, null);
+
+  // Incompatible unit conversion rejected cleanly
+  assert.equal(areUnitsCompatible('ppm', 'pH'), false);
+  const badConv = convertUnit(10, 'ppm', 'pH');
+  assert.equal(badConv.ok, false);
+});
+
+test('63. Phase 7 all 9 measurement qualifiers preserve semantic distinctions and externally supplied limit metadata across import, statistics, CSV exports, and ZIP packages', () => {
+  const allQualifiers: Array<{
+    sampleId: string;
+    token: string;
+    expectedQualifier: MeasurementValueQualifier;
+    expectedNumeric: number | null;
+  }> = [
+    { sampleId: 'Q-VALID', token: '14.25', expectedQualifier: 'valid_numeric', expectedNumeric: 14.25 },
+    { sampleId: 'Q-ZERO', token: '0.0', expectedQualifier: 'valid_zero', expectedNumeric: 0 },
+    { sampleId: 'Q-MISSING', token: '', expectedQualifier: 'missing', expectedNumeric: null },
+    { sampleId: 'Q-NOT-MEAS', token: 'NM', expectedQualifier: 'not_measured', expectedNumeric: null },
+    { sampleId: 'Q-ND', token: 'ND', expectedQualifier: 'not_detected', expectedNumeric: null },
+    { sampleId: 'Q-LOD', token: '<0.02', expectedQualifier: 'below_lod', expectedNumeric: null },
+    { sampleId: 'Q-LOQ', token: '<LOQ', expectedQualifier: 'below_loq', expectedNumeric: null },
+    { sampleId: 'Q-INV', token: 'ERR', expectedQualifier: 'instrument_invalid', expectedNumeric: null },
+  ];
+
+  for (const item of allQualifiers) {
+    const classified = classifyMeasurementToken(item.token);
+    assert.equal(classified.qualifier, item.expectedQualifier, `Token "${item.token}" qualifier mismatch`);
+    assert.equal(classified.numericValue, item.expectedNumeric, `Token "${item.token}" numeric mismatch`);
+  }
+
+  // Verify <0.02 preserves external suppliedLimitValue without inventing 0
+  const lodClass = classifyMeasurementToken('<0.02');
+  assert.equal(lodClass.qualifier, 'below_lod');
+  assert.equal(lodClass.numericValue, null);
+  assert.equal(lodClass.suppliedLimitValue, 0.02);
+
+  // Build an experiment with all 9 qualifiers in its analytical session (including excluded_by_user)
+  const demo = createInitialDemoWorkspace();
+  const exp = createBlankExperiment({
+    experimentId: 'EXP-QUAL-9',
+    title: 'Nine Qualifier Verification Study',
+    projectId: demo.projects[0].id,
+    researcher: 'Dr. Qualifier',
+    type: 'Uptake Survey',
+  });
+  const session = createBlankAnalyticalSession({
+    experimentUuid: exp.uuid,
+    sessionId: 'ANA-QUAL-01',
+    title: 'Qualifier Verification Session',
+    technique: 'ICP-OES',
+    analyst: 'Dr. Qualifier',
+  });
+
+  const rows: InstrumentMeasurement[] = allQualifiers.map((q, idx) => {
+    const c = classifyMeasurementToken(q.token);
+    return {
+      id: `qual-row-${idx + 1}`,
+      sampleId: 'SHARED-SAMPLE-QUAL',
+      sessionId: session.id,
+      analyteId: session.analytes[0]?.id ?? null,
+      linkedSurveySampleId: '',
+      stage: 'Final',
+      analyte: 'Pt',
+      replicateId: `R${idx + 1}`,
+      rawSignal: c.numericValue,
+      signalUnit: 'cps',
+      dilutionFactor: 1,
+      reportedValueBasis: 'already_dilution_corrected',
+      reportedConc: c.numericValue,
+      concUnit: 'ppm',
+      valueQualifier: c.qualifier,
+      originalValueToken: q.token,
+      suppliedLimitValue: c.suppliedLimitValue,
+      suppliedLimitType: c.suppliedLimitType,
+      suppliedLimitUnit: c.suppliedLimitValue !== null ? 'ppm' : null,
+      qualityStatus: 'valid',
+      measurementDate: '2026-11-24',
+      notes: '',
+      provenance: 'measured_experimental',
+    };
+  });
+
+  // Add 9th qualifier: excluded_by_user
+  rows.push({
+    id: 'qual-row-9',
+    sampleId: 'SHARED-SAMPLE-QUAL',
+    sessionId: session.id,
+    analyteId: session.analytes[0]?.id ?? null,
+    linkedSurveySampleId: '',
+    stage: 'Final',
+    analyte: 'Pt',
+    replicateId: 'R9',
+    rawSignal: 99.9,
+    signalUnit: 'cps',
+    dilutionFactor: 1,
+    reportedValueBasis: 'already_dilution_corrected',
+    reportedConc: 99.9,
+    concUnit: 'ppm',
+    valueQualifier: 'excluded_by_user',
+    originalValueToken: '99.9',
+    qualityStatus: 'excluded_by_user',
+    exclusionReason: 'Confirmed contamination spike',
+    measurementDate: '2026-11-24',
+    notes: 'Contaminated',
+    provenance: 'user_entered',
+  });
+
+  session.sampleMeasurements = rows;
+  exp.analyticalSessions = [session];
+  exp.activeAnalyticalSessionId = session.id;
+
+  // Replicate stats on SHARED-SAMPLE-QUAL must include ONLY valid_numeric (14.25) and valid_zero (0.0) in concStats -> validCount = 2, mean = 7.125
+  const repGroups = computeAnalyticalReplicateGroups(session.sampleMeasurements);
+  assert.equal(repGroups.length, 1);
+  assert.equal(repGroups[0].concStats.value.validCount, 2);
+  assert.equal(repGroups[0].totalCount, 9);
+  assert.ok(Math.abs((repGroups[0].concStats.value.mean ?? 0) - 7.125) < 1e-12);
+
+  // CSV export must preserve all 9 qualifiers and limit values
+  const samplesCsv = exportAnalyticalSessionSamplesCsv(exp, session);
+  for (const q of [
+    'valid_numeric',
+    'valid_zero',
+    'missing',
+    'not_measured',
+    'not_detected',
+    'below_lod',
+    'below_loq',
+    'instrument_invalid',
+    'excluded_by_user',
+  ]) {
+    assert.ok(samplesCsv.includes(q), `Exported analytical CSV missing qualifier ${q}`);
+  }
+  assert.ok(samplesCsv.includes('0.02'), 'Exported analytical CSV missing LOD limit value 0.02');
+});
+
+test('64. Phase 7 spreadsheet formula-injection neutralization prefixes dangerous text payloads while preserving signed numbers and <LOD qualifiers', () => {
+  // Dangerous formula strings must be prefixed with single quote
+  assert.equal(sanitizeSpreadsheetCell('=CMD|\' /C calc\'!A0'), '\'=CMD|\' /C calc\'!A0');
+  assert.equal(sanitizeSpreadsheetCell('+SUM(A1:A10)'), '\'+SUM(A1:A10)');
+  assert.equal(sanitizeSpreadsheetCell('-HYPERLINK("http://evil.tld")'), '\'-HYPERLINK("http://evil.tld")');
+  assert.equal(sanitizeSpreadsheetCell('@IMPORTXML(A1,A2)'), '\'@IMPORTXML(A1,A2)');
+
+  // Legitimate signed numeric strings and <LOD tokens must NOT be altered
+  assert.equal(sanitizeSpreadsheetCell('-0.425'), '-0.425');
+  assert.equal(sanitizeSpreadsheetCell('+1.25e-3'), '+1.25e-3');
+  assert.equal(sanitizeSpreadsheetCell('<LOD (0.05 mg/L)'), '<LOD (0.05 mg/L)');
+  assert.equal(sanitizeSpreadsheetCell('Pt/SiO2 Catalyst'), 'Pt/SiO2 Catalyst');
+
+  // Verify survey CSV and uncertainty CSV neutralize injected notes/labels
+  const demo = createInitialDemoWorkspace();
+  const exp = structuredClone(demo.experiments[0]);
+  exp.surveyDatasets[0].measurements[0].notes = '=WEBSERVICE("https://attacker.invalid")';
+  const surveyCsv = exportSurveyMeasurementsCsv(
+    exp,
+    exp.surveyDatasets[0].measurements,
+    exp.surveyDatasets[0]
+  );
+  assert.ok(
+    surveyCsv.includes("'=WEBSERVICE"),
+    'Survey CSV export must prefix leading = formula with single quote'
+  );
+
+  const uncRecords = exp.uncertaintyRecords ?? [];
+  uncRecords[0].notes = '@SUM(1+1)';
+  const uncCsv = exportUncertaintyRecordsCsv(uncRecords);
+  assert.ok(
+    uncCsv.includes("'@SUM(1+1)"),
+    'Uncertainty CSV export must prefix leading @ formula with single quote'
+  );
+});
+
+test('65. Phase 7 ZIP research package manifest matches archived files byte-for-byte with verified CRC-32 checksums and valid vector SVG XML', () => {
+  const demo = createInitialDemoWorkspace();
+  const exp = demo.experiments[0];
+  const pkg = buildResearchExportPackage(exp);
+
+  const zipEntries = listZipEntries(pkg.zipBytes);
+  const entryMap = new Map(zipEntries.map((e) => [e.path, e]));
+
+  // Extract and parse manifest.json from inside the ZIP binary
+  const manifestText = extractZipEntryText(pkg.zipBytes, 'manifest.json');
+  assert.ok(manifestText, 'manifest.json must be extractable from ZIP bytes');
+  const parsedManifest = JSON.parse(manifestText);
+  assert.equal(parsedManifest.appVersion, APP_VERSION);
+  assert.equal(parsedManifest.schemaVersion, WORKSPACE_SCHEMA_VERSION);
+  assert.equal(parsedManifest.calcEngineVersion, CALC_ENGINE_VERSION);
+
+  // Every file listed in manifest.includedFiles must exist in the ZIP archive with exact byte length and valid CRC-32
+  for (const mf of parsedManifest.includedFiles) {
+    const zipEntry = entryMap.get(mf.path);
+    assert.ok(zipEntry, `Manifest file ${mf.path} missing from ZIP central directory`);
+    assert.equal(
+      zipEntry.uncompressedSize,
+      mf.bytes,
+      `Byte size mismatch for ${mf.path}: manifest=${mf.bytes}, zip=${zipEntry.uncompressedSize}`
+    );
+    const extractedBytes = extractZipEntryBytes(pkg.zipBytes, mf.path);
+    assert.ok(extractedBytes, `Failed to extract ${mf.path}`);
+    assert.equal(extractedBytes.byteLength, mf.bytes);
+  }
+
+  // Inspect SVG figure files inside the ZIP package to confirm valid XML and plotted data elements
+  const svgFiles = parsedManifest.includedFiles.filter((f: { path: string }) =>
+    f.path.endsWith('.svg')
+  );
+  assert.ok(svgFiles.length >= 2, 'Package must contain survey and analytical SVG figures');
+  for (const svgFile of svgFiles) {
+    const svgXml = extractZipEntryText(pkg.zipBytes, svgFile.path) ?? '';
+    assert.ok(svgXml.startsWith('<?xml') || svgXml.startsWith('<svg'));
+    assert.ok(svgXml.includes('xmlns="http://www.w3.org/2000/svg"'));
+    assert.ok(svgXml.includes('</svg>'));
+    assert.ok(svgXml.includes('<circle') || svgXml.includes('<line'));
+  }
+});
+
+test('66. Phase 7 complete 22-step synthetic researcher journey executes end-to-end with full reproducibility and round-trip persistence', () => {
+  const storage = new MemoryStorage();
+  const ws = createInitialDemoWorkspace();
+
+  // Step 1: Create a research project
+  const project = {
+    id: 'proj-phase7-journey',
+    code: 'PRJ-P7-01',
+    name: 'Phase 7 Pt/SiO2 Verification Campaign',
+    description: 'End-to-end 22-step synthetic researcher journey verification',
+    principalInvestigator: 'Dr. C. Lin',
+    isDemonstration: false,
+    createdAt: '2026-11-24T09:00:00.000Z',
+    updatedAt: '2026-11-24T09:00:00.000Z',
+  };
+  ws.projects.push(project);
+
+  // Step 2: Create a blank experiment (confirm zero fabricated measurements)
+  const expId = generateUniqueExperimentId(ws.experiments);
+  const exp = createBlankExperiment({
+    experimentId: expId,
+    title: 'Hexammineplatinum(IV) Uptake on Aerosil-300 SiO2',
+    projectId: project.id,
+    researcher: 'Dr. C. Lin',
+    type: 'Uptake Survey',
+    objective: 'Verify cationic Pt uptake window above PZC of silica support.',
+  });
+  assert.equal(exp.isDemonstration, false);
+  assert.equal(exp.surveyDatasets[0].measurements.length, 0);
+  assert.equal(exp.analyticalSessions[0].sampleMeasurements.length, 0);
+
+  // Step 3: Record research objectives, hypotheses, and planned sample naming
+  exp.researchPlan = {
+    ...(exp.researchPlan ?? {
+      researchQuestions: [],
+      plannedSampleIds: [],
+      plannedMeasurementRequirements: '',
+      plannedAnalyticalSessions: '',
+      expectedDeliverables: '',
+      externalProtocolRefs: [],
+      deviations: [],
+    }),
+    researchQuestions: [
+      'Maximum electrostatic uptake occurs at pH 10.2–10.8 without precipitation.',
+      'Does surface loading at 1000 m²/L reach 1.4 µmol/m² plateau?',
+    ],
+    plannedSampleIds: ['J-UPT-01', 'J-UPT-02', 'J-UPT-03', 'J-UPT-04'],
+    plannedMeasurementRequirements: 'Triplicate pH & ICP-OES Pt assay at pH 8.5, 9.8, 10.5, 11.2',
+  };
+
+  // Step 4: Select support and precursor materials and bind immutable snapshots
+  const support = ws.supports[0];
+  const precursor = ws.precursors[0];
+  exp.batch.supportSnapshot = createSupportSnapshot(support);
+  exp.batch.precursorSnapshot = createPrecursorSnapshot(precursor);
+  exp.batch.plannedSurfaceLoadingM2L = 1000;
+  exp.batch.plannedSolutionVolumeMl = 50;
+  exp.batch.plannedTargetMetalLoadingWtPct = 1.5;
+
+  // Mutate global support surface area afterwards -> experiment snapshot must remain unchanged
+  const originalSnapArea = exp.batch.supportSnapshot.supportData?.betSurfaceArea.value ?? 0;
+  ws.supports[0] = {
+    ...support,
+    betSurfaceArea: {
+      ...support.betSurfaceArea,
+      value: originalSnapArea + 125,
+    },
+  };
+  assert.equal(
+    exp.batch.supportSnapshot.supportData?.betSurfaceArea.value,
+    originalSnapArea
+  );
+
+  // Step 5 & 6: Create uptake survey dataset and import survey CSV rows
+  const surveyCsvText = [
+    'Sample_ID,Sample_Group_ID,Replicate_ID,Measured_Initial_pH,Measured_Final_pH,Initial_Conc_ppm,Final_Conc_ppm,Recorded_Uptake,Notes',
+    'J-UPT-01A,RG-PH85,R1,8.50,8.32,200.0,152.0,0.48,Clean solution',
+    'J-UPT-01B,RG-PH85,R2,8.52,8.35,200.0,150.5,0.49,Replicate B',
+    'J-UPT-02A,RG-PH98,R1,9.80,9.55,200.0,118.0,0.82,Moderate uptake',
+    'J-UPT-02B,RG-PH98,R2,9.82,9.58,200.0,116.4,0.84,Replicate B',
+    'J-UPT-03A,RG-PH105,R1,10.50,10.25,200.0,88.0,1.12,Peak uptake window',
+    'J-UPT-03B,RG-PH105,R2,10.52,10.28,200.0,86.5,1.14,Replicate B',
+    'J-UPT-04,RG-PH114,R1,11.40,11.18,200.0,94.0,1.06,High ionic strength decline',
+  ].join('\n');
+  const parsedCsv = parseDelimitedText(surveyCsvText, ',');
+  const mapping = suggestCsvColumnMappings(parsedCsv.headers);
+  const builtSurvey = validateAndBuildCsvImport(parsedCsv, mapping, {
+    defaultDate: '2026-11-24',
+    defaultProvenance: 'measured_experimental',
+    surveyMode: 'uptake',
+    existingRowCount: 0,
+  });
+  assert.equal(builtSurvey.acceptedRows.length, 7);
+  exp.surveyDatasets[0].measurements = builtSurvey.acceptedRows;
+
+  // Step 7: Organize replicate groups and compute replicate summaries
+  const surveyAnalysis = analyzeSurveyDataset(exp.surveyDatasets[0].measurements);
+  assert.equal(surveyAnalysis.replicateGroups.length, 4);
+  const rg105 = surveyAnalysis.replicateGroups.find(
+    (g) => g.sampleGroupId === 'RG-PH105'
+  );
+  assert.ok(rg105);
+  assert.equal(rg105.totalRowCount, 2);
+
+  // Step 8 & 9: Create analytical session and import instrument data including <LOD and ND rows
+  const instrumentCsv = [
+    'Sample_ID,Analyte,Stage,Replicate,Dilution_Factor,Raw_Signal,Reported_Conc,Conc_Unit,Notes',
+    'J-UPT-03A,Pt,Final,R1,10,44120,87.4,ppm,Linked ICP-OES run',
+    'J-BLANK-01,Pt,Blank,R1,1,12,<0.015,ppm,Method blank below LOD',
+    'J-WASH-01,Pt,Final,R1,1,4,ND,ppm,No detectable metal in filtrate',
+  ].join('\n');
+  const parsedInst = parseDelimitedText(instrumentCsv, ',');
+  const instMapping = suggestInstrumentColumnMapping(parsedInst.headers);
+  let seq = 0;
+  const builtInst = validateAndBuildInstrumentImport({
+    headers: parsedInst.headers,
+    rawRows: parsedInst.rows,
+    mapping: instMapping,
+    sessionId: exp.analyticalSessions[0].id,
+    filename: 'journey_icp.csv',
+    format: 'csv',
+    defaultAnalyte: exp.analyticalSessions[0].analytes[0],
+    defaultCalibrationDatasetId: null,
+    defaultConcUnit: 'ppm',
+    defaultSignalUnit: 'cps',
+    defaultDate: '2026-11-24',
+    defaultProvenance: 'measured_experimental',
+    defaultValueBasis: 'already_dilution_corrected',
+    existingMeasurements: [],
+    knownSurveySampleIds: ['J-UPT-03A'],
+    idGenerator: (p) => `${p}-j-${++seq}`,
+  });
+  assert.equal(builtInst.acceptedRecords.length, 3);
+  exp.analyticalSessions[0].sampleMeasurements = builtInst.acceptedRecords;
+
+  // Step 10: Link analytical measurement J-UPT-03A (87.4 ppm) to survey measurement J-UPT-03A (88.0 ppm)
+  const surveyRow3A = exp.surveyDatasets[0].measurements.find(
+    (m) => m.sampleId === 'J-UPT-03A'
+  )!;
+  const instRow3A = exp.analyticalSessions[0].sampleMeasurements.find(
+    (m) => m.sampleId === 'J-UPT-03A'
+  )!;
+  surveyRow3A.linkedFinalMeasurementId = instRow3A.id;
+  instRow3A.linkedSurveyMeasurementId = surveyRow3A.id;
+
+  // Confirm survey row is NOT silently overwritten prior to explicit apply
+  assert.equal(surveyRow3A.finalConcPpm, 88.0);
+  const linksBefore = resolveSurveyAnalyticalLinks(
+    exp.surveyDatasets[0].measurements,
+    exp.analyticalSessions[0].sampleMeasurements
+  );
+  const link3A = linksBefore[surveyRow3A.id];
+  assert.ok(link3A);
+  assert.equal(link3A.final.hasDiscrepancy, true);
+
+  // Explicitly apply analytical value (87.4 ppm) to survey row
+  surveyRow3A.finalConcPpm = instRow3A.reportedConc;
+
+  // Step 11 & 12: Inspect advanced descriptive statistics and save a figure preset
+  const advUptake = computeAdvancedDescriptiveStatistics(
+    exp.surveyDatasets[0].measurements.map((m) => ({
+      value: m.recordedUptakeUmolM2,
+      qualityStatus: m.qualityStatus,
+    }))
+  );
+  assert.equal(advUptake.status, 'available');
+  assert.equal(advUptake.value.validCount, 7);
+  exp.surveyDatasets[0].savedFigures.push({
+    ...exp.surveyDatasets[0].figureConfig,
+    id: 'fig-journey-01',
+    name: 'Pt/SiO2 Uptake vs Final pH Figure Preset',
+  });
+
+  // Step 13: Record and propagate measurement uncertainty
+  const propUnc = propagateLinearCombinationUncertainty(
+    [
+      {
+        id: 'c0',
+        label: 'Initial Pt Conc',
+        symbol: 'C0',
+        value: 200.0,
+        unit: 'ppm',
+        standardUncertainty: 0.8,
+        uncertaintyType: 'standard_uncertainty',
+        coefficientOrExponent: 1,
+        sourceNote: 'Volumetric standard',
+      },
+      {
+        id: 'cf',
+        label: 'Final Pt Conc',
+        symbol: 'Cf',
+        value: 87.4,
+        unit: 'ppm',
+        standardUncertainty: 0.6,
+        uncertaintyType: 'standard_uncertainty',
+        coefficientOrExponent: -1,
+        sourceNote: 'ICP-OES assay',
+      },
+    ],
+    [],
+    { coverageFactor: 2, unit: 'ppm' }
+  );
+  assert.equal(propUnc.status, 'valid');
+  assert.ok(
+    Math.abs((propUnc.value?.combinedStandardUncertainty ?? 0) - 1.0) < 1e-12
+  );
+
+  exp.uncertaintyRecords = [
+    ...(exp.uncertaintyRecords ?? []),
+    {
+      id: 'unc-journey-1',
+      experimentUuid: exp.uuid,
+      targetKind: 'survey_measurement',
+      measurementId: surveyRow3A.id,
+      measurementLabel: 'J-UPT-03A ΔC',
+      quantityName: 'Concentration Depletion (C0 - Cf)',
+      value: propUnc.value!.combinedValue,
+      unit: 'ppm',
+      uncertaintyValue: propUnc.value!.expandedUncertainty,
+      uncertaintyUnit: 'ppm',
+      uncertaintyType: 'expanded_uncertainty',
+      coverageFactor: 2,
+      source: 'ICP-OES calibration + volumetric prep',
+      reference: 'EURACHEM/CITAC QUAM',
+      conditions: '1000 m²/L, 25 °C',
+      notes: 'Verified in 22-step journey',
+      provenance: 'derived_calculated',
+      reviewStatus: 'Reviewed',
+      createdAt: '2026-11-24T11:00:00.000Z',
+      updatedAt: '2026-11-24T11:00:00.000Z',
+    },
+  ];
+
+  // Step 14 & 15: Compare across experiments and generate Research Comparison Matrix
+  ws.experiments.push(exp);
+  ws.activeExperimentUuid = exp.uuid;
+  const realOnlyScope = createDefaultResearchScopeFilter(); // excludes synthetic demo
+  const matrixRows = buildResearchMatrixRows(ws, realOnlyScope, 'survey_dataset');
+  assert.equal(matrixRows.length, 1);
+  assert.equal(matrixRows[0].experimentUuid, exp.uuid);
+
+  // Step 16: Record structured research observations and notes
+  exp.observations.push({
+    id: 'obs-journey-1',
+    timestamp: '2026-11-24T11:15:00.000Z',
+    author: 'Dr. C. Lin',
+    module: 'uptake-survey',
+    category: 'Survey',
+    text: 'Minimal pH buffering drift observed at pH 10.5 plateau.',
+    provenance: 'user_entered',
+  });
+
+  // Step 17 & 18: Create an immutable experiment snapshot and generate a finalized report bound to it
+  const snapshot = createExperimentSnapshotRecord(exp, {
+    snapshotId: 'SNAP-JOURNEY-01',
+    name: 'Pre-Publication Verification Snapshot',
+    description: 'Locked after ICP-OES linkage and uncertainty propagation.',
+    researcher: 'Dr. C. Lin',
+  });
+  exp.snapshots = [...(exp.snapshots ?? []), snapshot];
+
+  const finalizedReport = {
+    id: 'rep-journey-1',
+    versionNumber: 1,
+    title: 'Finalized SEA Research Report — J-UPT Campaign',
+    reportType: 'complete-research' as const,
+    snapshotId: snapshot.snapshotId,
+    snapshotName: snapshot.name,
+    finalizedAt: '2026-11-24T11:30:00.000Z',
+    researcher: 'Dr. C. Lin',
+    scientificReviewStatus: 'Reviewed' as const,
+    reportConfig: structuredClone(exp.reportConfig),
+    notes: 'Locked for Phase 7 release gate verification.',
+  };
+  exp.finalizedReports = [...(exp.finalizedReports ?? []), finalizedReport];
+
+  // Mutate live experiment title and measurement AFTER snapshot -> snapshot payload must remain untouched
+  exp.title = 'Live Mutated Title After Finalization';
+  exp.surveyDatasets[0].measurements[0].finalConcPpm = 999.9;
+  assert.equal(
+    snapshot.payload.title,
+    'Hexammineplatinum(IV) Uptake on Aerosil-300 SiO2'
+  );
+  assert.equal(
+    snapshot.payload.surveyDatasets[0].measurements[0].finalConcPpm,
+    152.0
+  );
+
+  // Step 19: Export a consolidated ZIP research package from the immutable snapshot
+  const zipPkg = buildResearchExportPackage(exp, { snapshot });
+  const extractedMeta = JSON.parse(
+    extractZipEntryText(zipPkg.zipBytes, 'experiment_metadata.json') ?? '{}'
+  );
+  assert.equal(
+    extractedMeta.title,
+    'Hexammineplatinum(IV) Uptake on Aerosil-300 SiO2'
+  );
+
+  // Step 20, 21 & 22: Export JSON workspace backup, reload from storage, and restore into a clean workspace
+  const saveRes = saveWorkspaceToStorage(ws, storage);
+  assert.equal(saveRes.ok, true);
+
+  const backupJson = serializeWorkspaceBackup(ws);
+  const parsedBackup = parseWorkspaceBackup(backupJson);
+  assert.equal(parsedBackup.valid, true);
+
+  const reloaded = loadWorkspaceFromStorage(storage);
+  assert.equal(reloaded.status, 'loaded');
+  const reloadedExp = reloaded.data?.experiments.find((e) => e.uuid === exp.uuid);
+  assert.ok(reloadedExp);
+  assert.equal((reloadedExp.snapshots ?? []).length, 1);
+  assert.equal((reloadedExp.finalizedReports ?? []).length, 1);
+  assert.equal(
+    reloadedExp.snapshots![0].payload.surveyDatasets[0].measurements[0].finalConcPpm,
+    152.0
+  );
+});
+
+test('67. RC.1/RC.2 targeted reproducibility: 3-experiment cross-experiment finalized report survives edits, deletions, reopening, and JSON backup/restore', () => {
+  const ws = createInitialDemoWorkspace();
+
+  const makeSurveyRow = (
+    id: string,
+    sampleId: string,
+    groupId: string,
+    phi: number,
+    phf: number,
+    uptake: number
+  ): SurveyMeasurement => ({
+    id,
+    sampleId,
+    sampleGroupId: groupId,
+    replicateId: 'R1',
+    targetInitialPh: phi,
+    measuredInitialPh: phi,
+    measuredFinalPh: phf,
+    initialConcPpm: 200,
+    finalConcPpm: 160,
+    supportMassMg: 100,
+    solutionVolumeMl: 50,
+    recordedUptakeUmolM2: uptake,
+    uptakeUnit: 'µmol/m²',
+    concUnit: 'ppm',
+    linkedInitialMeasurementId: null,
+    linkedFinalMeasurementId: null,
+    provenance: 'measured_experimental',
+    qualityStatus: 'valid',
+    exclusionReason: '',
+    measurementDate: '2026-11-24',
+    notes: 'Synthetic RC check measurement.',
+  });
+
+  const buildIndependentExp = (opts: {
+    uuid: string;
+    experimentId: string;
+    title: string;
+    supportName: string;
+    datasetId: string;
+    datasetCode: string;
+    datasetTitle: string;
+    sl: number;
+    tempC: number;
+    rows: SurveyMeasurement[];
+  }): Experiment => {
+    const exp = createBlankExperiment({
+      experimentId: opts.experimentId,
+      title: opts.title,
+      projectId: ws.projects[0].id,
+      researcher: 'Dr. R. Sato',
+      type: 'Uptake Survey',
+      objective: `Cross-experiment reproducibility check (${opts.experimentId})`,
+      experimentDate: '2026-11-24',
+    });
+    exp.uuid = opts.uuid;
+    exp.scientificReviewStatus = 'Reviewed';
+    exp.batch.plannedSurfaceLoadingM2L = opts.sl;
+    exp.batch.supportSnapshot = {
+      snapshotId: `supp-snap-${opts.uuid}`,
+      capturedAt: '2026-11-24T12:00:00.000Z',
+      sourceMaterialId: `supp-${opts.uuid}`,
+      materialKind: 'support',
+      sourceUpdatedAt: '2026-11-24T12:00:00.000Z',
+      supportData: {
+        ...ws.supports[0],
+        id: `supp-${opts.uuid}`,
+        name: opts.supportName,
+      },
+    };
+    const ds = createBlankSurveyDataset({
+      datasetId: opts.datasetCode,
+      title: opts.datasetTitle,
+      mode: 'uptake',
+      researcher: 'Dr. R. Sato',
+    });
+    ds.id = opts.datasetId;
+    ds.config.targetSurfaceLoadingM2L = opts.sl;
+    ds.config.temperatureC = opts.tempC;
+    ds.measurements = opts.rows;
+    ds.figureConfig.plotType = 'comparative';
+    ds.figureConfig.name = '3-Experiment Comparative Overlay';
+    exp.surveyDatasets = [ds];
+    exp.activeSurveyDatasetId = ds.id;
+    exp.reportConfig.selectedSurveyDatasetIds = [ds.id];
+    exp.reportConfig.includeComparativeSummary = true;
+    exp.reportConfig.includeCrossExperimentSummary = true;
+    exp.reportConfig.includeResearchMatrix = true;
+    exp.reportConfig.includeSurveyFigure = true;
+    return projectExperimentCompatibilityMirrors(exp);
+  };
+
+  const exp1 = buildIndependentExp({
+    uuid: 'exp-rc-01',
+    experimentId: 'SEA-RC-001',
+    title: 'Pt on SiO2 — 1000 m²/L',
+    supportName: 'SiO2 S-300',
+    datasetId: 'ds-rc-01',
+    datasetCode: 'DS-RC-01',
+    datasetTitle: 'SiO2 Uptake Series',
+    sl: 1000,
+    tempC: 22,
+    rows: [
+      makeSurveyRow('rc1-r1', 'RC1-01', 'G1', 9.0, 8.7, 1.25),
+      makeSurveyRow('rc1-r2', 'RC1-02', 'G2', 10.5, 10.1, 1.75),
+    ],
+  });
+  const exp2 = buildIndependentExp({
+    uuid: 'exp-rc-02',
+    experimentId: 'SEA-RC-002',
+    title: 'Pt on γ-Al2O3 — 2000 m²/L',
+    supportName: 'γ-Al2O3 A-180',
+    datasetId: 'ds-rc-02',
+    datasetCode: 'DS-RC-02',
+    datasetTitle: 'Al2O3 Uptake Series',
+    sl: 2000,
+    tempC: 25,
+    rows: [
+      makeSurveyRow('rc2-r1', 'RC2-01', 'G1', 3.5, 3.8, 0.85),
+      makeSurveyRow('rc2-r2', 'RC2-02', 'G2', 4.5, 4.7, 1.05),
+      makeSurveyRow('rc2-r3', 'RC2-03', 'G3', 5.5, 5.6, 1.25),
+    ],
+  });
+  const exp3 = buildIndependentExp({
+    uuid: 'exp-rc-03',
+    experimentId: 'SEA-RC-003',
+    title: 'Pt on TiO2 P25 — 500 m²/L',
+    supportName: 'TiO2 P25',
+    datasetId: 'ds-rc-03',
+    datasetCode: 'DS-RC-03',
+    datasetTitle: 'TiO2 Uptake Series',
+    sl: 500,
+    tempC: 30,
+    rows: [
+      makeSurveyRow('rc3-r1', 'RC3-01', 'G1', 8.0, 7.8, 2.1),
+      makeSurveyRow('rc3-r2', 'RC3-02', 'G2', 9.5, 9.2, 2.5),
+    ],
+  });
+
+  exp1.datasetComparison = {
+    selectedRefs: [
+      { experimentUuid: exp1.uuid, datasetId: 'ds-rc-01' },
+      { experimentUuid: exp2.uuid, datasetId: 'ds-rc-02' },
+      { experimentUuid: exp3.uuid, datasetId: 'ds-rc-03' },
+    ],
+    comparePlotMode: 'uptake_vs_phf',
+    showGroupMeans: false,
+    errorBarMode: 'sd',
+  };
+
+  ws.experiments = [exp1, exp2, exp3];
+  ws.activeExperimentUuid = exp1.uuid;
+
+  const computeComparisonFromContext = (
+    ctx: ReturnType<typeof resolveFinalizedReportContext>
+  ) => {
+    const refs = ctx.effectiveExperiment.datasetComparison?.selectedRefs ?? [];
+    const items = refs
+      .map((ref) => {
+        const matchedExp = ctx.crossExperimentPool.find(
+          (e) => e.uuid === ref.experimentUuid
+        );
+        const matchedDs = matchedExp?.surveyDatasets.find(
+          (d) => d.id === ref.datasetId
+        );
+        return matchedExp && matchedDs
+          ? { experiment: matchedExp, dataset: matchedDs }
+          : null;
+      })
+      .filter((x): x is { experiment: Experiment; dataset: NonNullable<typeof x>['dataset'] } =>
+        Boolean(x)
+      );
+    return buildDatasetComparison(items);
+  };
+
+  // 1. Live report contains all three independent experiments
+  const liveCtx = resolveFinalizedReportContext(exp1, null, ws.experiments);
+  assert.equal(liveCtx.crossExperimentPool.length, 3);
+  const liveComp = computeComparisonFromContext(liveCtx);
+  assert.equal(liveComp.entries.length, 3);
+  assert.deepEqual(
+    liveComp.entries.map((e) => e.experimentId),
+    ['SEA-RC-001', 'SEA-RC-002', 'SEA-RC-003']
+  );
+  const expectedMeans = liveComp.entries.map((e) => e.analysis.uptakeStats.value.mean);
+  const expectedSvgLive = buildDataDrivenSurveyFigureSvg(
+    liveCtx.effectiveExperiment,
+    liveCtx.effectiveExperiment.surveyDatasets[0],
+    liveCtx.effectiveExperiment.surveyDatasets[0].figureConfig
+  );
+
+  // 2. Finalize the report, binding primary snapshot + frozen cross-experiment snapshots
+  const primarySnap = createExperimentSnapshotRecord(exp1, {
+    snapshotId: 'snap-rc-primary-1',
+    name: '3-Exp Finalization Snapshot',
+    capturedAt: '2026-11-24T13:00:00.000Z',
+    researcher: 'Dr. R. Sato',
+  });
+  let snapxIdx = 0;
+  const crossSnaps = captureCrossExperimentSnapshotsForReport(
+    primarySnap.payload,
+    ws.experiments,
+    exp1.reportConfig,
+    {
+      capturedAt: '2026-11-24T13:00:00.000Z',
+      researcher: 'Dr. R. Sato',
+      idGenerator: (prefix) => `${prefix}-rc-${++snapxIdx}`,
+    }
+  );
+  assert.equal(crossSnaps.length, 2);
+
+  const finalizedReport: FinalizedReport = {
+    id: 'frep-rc-3exp',
+    versionNumber: 1,
+    title: '3-Experiment Comparative SEA Report',
+    reportType: 'complete-research',
+    snapshotId: primarySnap.snapshotId,
+    snapshotName: primarySnap.name,
+    finalizedAt: '2026-11-24T13:00:00.000Z',
+    researcher: 'Dr. R. Sato',
+    scientificReviewStatus: 'Reviewed',
+    reportConfig: structuredClone(exp1.reportConfig),
+    notes: 'Locks comparison across SEA-RC-001, SEA-RC-002, and SEA-RC-003.',
+    crossExperimentSnapshots: crossSnaps,
+  };
+  exp1.snapshots = [primarySnap];
+  exp1.finalizedReports = [finalizedReport];
+
+  // 3. Edit live exp1 & exp2 aggressively AND delete live exp3 completely
+  exp1.title = 'MUTATED LIVE EXP 1';
+  exp1.surveyDatasets[0].measurements[0].recordedUptakeUmolM2 = 99.9;
+  exp1.datasetComparison.selectedRefs = [];
+  exp2.title = 'MUTATED LIVE EXP 2';
+  exp2.batch.supportSnapshot!.supportData!.name = 'MUTATED SUPPORT';
+  exp2.surveyDatasets[0].measurements = [
+    makeSurveyRow('rc2-mut', 'RC2-MUT', 'GM', 6.0, 6.0, 50.0),
+  ];
+  ws.experiments = [exp1, exp2]; // exp3 deleted!
+
+  // 4. Reopen finalized report -> must preserve exact 3-experiment comparison, summaries, datasets, and figures
+  const reopenedCtx = resolveFinalizedReportContext(
+    exp1,
+    exp1.finalizedReports[0],
+    ws.experiments
+  );
+  assert.equal(reopenedCtx.hasFrozenComparisonSnapshots, true);
+  assert.equal(reopenedCtx.crossExperimentPool.length, 3);
+  assert.deepEqual(
+    reopenedCtx.crossExperimentPool.map((e) => e.experimentId),
+    ['SEA-RC-001', 'SEA-RC-002', 'SEA-RC-003']
+  );
+  assert.equal(reopenedCtx.crossExperimentPool[0].title, 'Pt on SiO2 — 1000 m²/L');
+  assert.equal(
+    reopenedCtx.crossExperimentPool[1].batch.supportSnapshot?.supportData?.name,
+    'γ-Al2O3 A-180'
+  );
+  assert.equal(
+    reopenedCtx.crossExperimentPool[2].batch.supportSnapshot?.supportData?.name,
+    'TiO2 P25'
+  );
+
+  const reopenedComp = computeComparisonFromContext(reopenedCtx);
+  assert.equal(reopenedComp.entries.length, 3);
+  assert.deepEqual(
+    reopenedComp.entries.map((e) => e.analysis.uptakeStats.value.mean),
+    expectedMeans
+  );
+  assert.deepEqual(
+    reopenedComp.entries.map((e) => e.dataset.id),
+    ['ds-rc-01', 'ds-rc-02', 'ds-rc-03']
+  );
+  assert.equal(
+    reopenedCtx.effectiveExperiment.surveyDatasets[0].figureConfig.plotType,
+    'comparative'
+  );
+  const reopenedSvg = buildDataDrivenSurveyFigureSvg(
+    reopenedCtx.effectiveExperiment,
+    reopenedCtx.effectiveExperiment.surveyDatasets[0],
+    reopenedCtx.effectiveExperiment.surveyDatasets[0].figureConfig
+  );
+  assert.equal(reopenedSvg, expectedSvgLive);
+
+  // 5. Legacy finalized report without crossExperimentSnapshots remains strictly isolated
+  const legacyReport: FinalizedReport = {
+    ...finalizedReport,
+    id: 'frep-rc-legacy',
+    crossExperimentSnapshots: undefined,
+  };
+  const legacyCtx = resolveFinalizedReportContext(exp1, legacyReport, ws.experiments);
+  assert.equal(legacyCtx.hasFrozenComparisonSnapshots, false);
+  assert.equal(legacyCtx.crossExperimentPool.length, 1);
+  assert.equal(legacyCtx.crossExperimentPool[0].uuid, exp1.uuid);
+
+  // 6. JSON backup & restoration preserve the finalized cross-experiment comparison
+  const backupJson = serializeWorkspaceBackup(ws);
+  const parsed = parseWorkspaceBackup(backupJson);
+  assert.equal(parsed.valid, true);
+  assert.ok(parsed.data);
+
+  const restoredExp1 = parsed.data.workspace.experiments.find(
+    (e) => e.uuid === exp1.uuid
+  )!;
+  assert.ok(restoredExp1);
+  const restoredFinalized = (restoredExp1.finalizedReports ?? []).find(
+    (r) => r.id === finalizedReport.id
+  )!;
+  assert.ok(restoredFinalized);
+  assert.equal((restoredFinalized.crossExperimentSnapshots ?? []).length, 2);
+
+  const restoredCtx = resolveFinalizedReportContext(
+    restoredExp1,
+    restoredFinalized,
+    parsed.data.workspace.experiments
+  );
+  assert.equal(restoredCtx.crossExperimentPool.length, 3);
+  const restoredComp = computeComparisonFromContext(restoredCtx);
+  assert.equal(restoredComp.entries.length, 3);
+  assert.deepEqual(
+    restoredComp.entries.map((e) => e.analysis.uptakeStats.value.mean),
+    expectedMeans
+  );
+  assert.deepEqual(
+    restoredComp.entries.map((e) => e.dataset.id),
+    ['ds-rc-01', 'ds-rc-02', 'ds-rc-03']
+  );
+});
+
+
+
+
 
 
 

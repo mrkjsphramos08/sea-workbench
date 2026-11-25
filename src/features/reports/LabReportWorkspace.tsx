@@ -42,14 +42,18 @@ import {
   buildDatasetComparison,
   buildExperimentTimeline,
   buildUnifiedSampleRegistry,
+  computeAdvancedDescriptiveStatistics,
+  convertToRelativeUncertainty,
   detectAnalyticalQualityIssues,
   evaluateBatchSynthesisBoundary,
   evaluateDilutionConsistency,
   evaluateSurveyCompleteness,
   formatQualifiedMeasurementValue,
   formatScientificNumber,
+  formatUncertaintyTypeLabel,
   formatWithScientificNotation,
   hasExperimentChangedSinceSnapshot,
+  resolveFinalizedReportContext,
   resolveSurveyAnalyticalLinks,
 } from '../../domain/calculations/seaMath';
 import {
@@ -120,28 +124,20 @@ export function LabReportWorkspace({
     return finalizedReports.find((r) => r.id === selectedFinalizedId) ?? null;
   }, [finalizedReports, selectedFinalizedId]);
 
-  const boundSnapshot: ExperimentSnapshot | null = useMemo(() => {
-    if (!activeFinalizedReport) return null;
-    return (
-      snapshots.find(
-        (s) => s.snapshotId === activeFinalizedReport.snapshotId
-      ) ?? null
-    );
-  }, [activeFinalizedReport, snapshots]);
-
-  // When viewing a Finalized Report, render from its immutable bound snapshot payload
-  // so subsequent live experiment edits NEVER mutate the archived report.
-  const effectiveExperiment: Experiment = useMemo(() => {
-    if (!activeFinalizedReport || !boundSnapshot) {
-      return experiment;
-    }
-    return {
-      ...boundSnapshot.payload,
-      snapshots: experiment.snapshots,
-      finalizedReports: experiment.finalizedReports,
-      reportConfig: activeFinalizedReport.reportConfig,
-    };
-  }, [activeFinalizedReport, boundSnapshot, experiment]);
+  const {
+    effectiveExperiment,
+    crossExperimentPool,
+    boundSnapshot,
+    hasFrozenComparisonSnapshots,
+  } = useMemo(
+    () =>
+      resolveFinalizedReportContext(
+        experiment,
+        activeFinalizedReport,
+        allExperiments
+      ),
+    [experiment, activeFinalizedReport, allExperiments]
+  );
 
   const reportConfig: ReportConfiguration = activeFinalizedReport
     ? activeFinalizedReport.reportConfig
@@ -217,13 +213,9 @@ export function LabReportWorkspace({
 
   const comparativeSummary = useMemo(() => {
     const refs = effectiveExperiment.datasetComparison?.selectedRefs ?? [];
-    const expPool =
-      !isViewingFinalized && allExperiments.length > 0
-        ? allExperiments
-        : [effectiveExperiment];
     const items: Array<{ experiment: Experiment; dataset: SurveyDataset }> = [];
     for (const ref of refs) {
-      const exp = expPool.find((e) => e.uuid === ref.experimentUuid);
+      const exp = crossExperimentPool.find((e) => e.uuid === ref.experimentUuid);
       const ds = exp?.surveyDatasets.find((d) => d.id === ref.datasetId);
       if (exp && ds) items.push({ experiment: exp, dataset: ds });
     }
@@ -236,12 +228,7 @@ export function LabReportWorkspace({
       );
     }
     return buildDatasetComparison(items);
-  }, [
-    effectiveExperiment,
-    allExperiments,
-    selectedDatasets,
-    isViewingFinalized,
-  ]);
+  }, [effectiveExperiment, crossExperimentPool, selectedDatasets]);
 
   // Phase 4: Resolve selected analytical sessions
   const selectedAnalyticalSessions: AnalyticalSession[] = useMemo(() => {
@@ -1046,6 +1033,10 @@ export function LabReportWorkspace({
                   { key: 'includeScientificReferences', label: 'References' },
                   { key: 'includeObservations', label: 'Lab Log Notes' },
                   { key: 'includeBenchChecklist', label: 'Milestones / Checklist' },
+                  { key: 'includeCrossExperimentSummary', label: 'Cross-Exp Summary' },
+                  { key: 'includeResearchMatrix', label: 'Research Matrix' },
+                  { key: 'includeAdvancedStatistics', label: 'Quartiles / IQR / MAD' },
+                  { key: 'includeMeasurementUncertainty', label: 'Measurement Uncertainty' },
                   { key: 'includeSnapshotMetadata', label: 'Provenance Block' },
                 ].map((opt) => {
                   const rawVal =
@@ -1972,6 +1963,13 @@ export function LabReportWorkspace({
                     figureConfig={dataset.figureConfig}
                     experimentId={effectiveExperiment.experimentId}
                     referencePzcMarkers={dataset.referencePzcMarkers}
+                    comparison={comparativeSummary}
+                    comparePlotMode={
+                      effectiveExperiment.datasetComparison?.comparePlotMode
+                    }
+                    compareShowGroupMeans={
+                      effectiveExperiment.datasetComparison?.showGroupMeans
+                    }
                     height={235}
                     compact
                     hideExports
@@ -1987,6 +1985,13 @@ export function LabReportWorkspace({
                           figureConfig={savedFig}
                           experimentId={effectiveExperiment.experimentId}
                           referencePzcMarkers={dataset.referencePzcMarkers}
+                          comparison={comparativeSummary}
+                          comparePlotMode={
+                            effectiveExperiment.datasetComparison?.comparePlotMode
+                          }
+                          compareShowGroupMeans={
+                            effectiveExperiment.datasetComparison?.showGroupMeans
+                          }
                           height={230}
                           compact
                           hideExports
@@ -2843,6 +2848,207 @@ export function LabReportWorkspace({
             </p>
           </section>
         )}
+
+        {/* Phase 6: Advanced Descriptive Statistics (Quartiles, IQR, MAD, Box-Plot Fences) */}
+        {reportConfig.includeAdvancedStatistics && datasetReports.length > 0 && (
+          <section className="print-avoid-break space-y-2 pt-2 border-t border-[#D1D5DB]">
+            <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
+              11. Advanced Descriptive Statistics (Quartiles, IQR, MAD &amp; 1.5×IQR Fences)
+            </h3>
+            <table className="w-full text-left border-collapse text-[10px] border border-[#D1D5DB]">
+              <thead>
+                <tr className="bg-[#F3F4F6] border-b border-[#D1D5DB] text-[9.5px] uppercase text-[#4B5563]">
+                  <th className="py-1.5 px-2 font-medium">Dataset / Quantity</th>
+                  <th className="py-1.5 px-2 font-medium text-right">Valid n</th>
+                  <th className="py-1.5 px-2 font-medium text-right">Mean ± SD</th>
+                  <th className="py-1.5 px-2 font-medium text-right">SEM</th>
+                  <th className="py-1.5 px-2 font-medium text-right">Q1 (25%)</th>
+                  <th className="py-1.5 px-2 font-medium text-right">Median (Q2)</th>
+                  <th className="py-1.5 px-2 font-medium text-right">Q3 (75%)</th>
+                  <th className="py-1.5 px-2 font-medium text-right">IQR</th>
+                  <th className="py-1.5 px-2 font-medium text-right">MAD</th>
+                  <th className="py-1.5 px-2 font-medium text-right">Outside 1.5×IQR</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#E5E7EB] font-mono tabular-nums">
+                {datasetReports.map(({ dataset }) => {
+                  const advRes = computeAdvancedDescriptiveStatistics(
+                    dataset.measurements.map((m) => ({
+                      value:
+                        dataset.mode === 'pzc'
+                          ? m.measuredFinalPh !== null && m.measuredInitialPh !== null
+                            ? m.measuredFinalPh - m.measuredInitialPh
+                            : null
+                          : m.recordedUptakeUmolM2,
+                      qualityStatus: m.qualityStatus,
+                    })),
+                    { excludeFlagged: dataset.analysisConfig.excludeFlaggedInStats }
+                  );
+                  const adv = advRes.data;
+                  return (
+                    <tr key={dataset.id}>
+                      <td className="py-1 px-2 font-sans">
+                        <span className="font-mono font-semibold text-[#0F52BA]">
+                          {dataset.datasetId}
+                        </span>{' '}
+                        ({dataset.mode === 'pzc' ? 'ΔpH (pH)' : 'Uptake (µmol/m²)'})
+                      </td>
+                      <td className="py-1 px-2 text-right">{adv?.validCount ?? 0}</td>
+                      <td className="py-1 px-2 text-right">
+                        {formatScientificNumber(adv?.mean ?? null, 3)} ±{' '}
+                        {formatScientificNumber(adv?.sampleStdDev ?? null, 3)}
+                      </td>
+                      <td className="py-1 px-2 text-right">
+                        {formatScientificNumber(adv?.sem ?? null, 3)}
+                      </td>
+                      <td className="py-1 px-2 text-right">
+                        {formatScientificNumber(adv?.q1 ?? null, 3)}
+                      </td>
+                      <td className="py-1 px-2 text-right font-semibold">
+                        {formatScientificNumber(adv?.median ?? null, 3)}
+                      </td>
+                      <td className="py-1 px-2 text-right">
+                        {formatScientificNumber(adv?.q3 ?? null, 3)}
+                      </td>
+                      <td className="py-1 px-2 text-right">
+                        {formatScientificNumber(adv?.iqr ?? null, 3)}
+                      </td>
+                      <td className="py-1 px-2 text-right">
+                        {formatScientificNumber(adv?.mad ?? null, 3)}
+                      </td>
+                      <td className="py-1 px-2 text-right">
+                        {adv?.boxPlotSummary.outsideFenceValues.length ?? 0}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div className="text-[10px] text-[#6B7280]">
+              Quartiles use Type 7 (R-7) linear interpolation. Sample SD (s) and SEM (s/√n) are reported distinctly and never conflated with expanded measurement uncertainty.
+            </div>
+          </section>
+        )}
+
+        {/* Phase 6: Recorded Measurement Uncertainty & Assumptions */}
+        {reportConfig.includeMeasurementUncertainty &&
+          (effectiveExperiment.uncertaintyRecords ?? []).length > 0 && (
+            <section className="print-avoid-break space-y-2 pt-2 border-t border-[#D1D5DB]">
+              <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
+                12. Recorded Measurement Uncertainty &amp; Assumptions (
+                {(effectiveExperiment.uncertaintyRecords ?? []).length} record(s))
+              </h3>
+              <table className="w-full text-left border-collapse text-[10px] border border-[#D1D5DB]">
+                <thead>
+                  <tr className="bg-[#F3F4F6] border-b border-[#D1D5DB] text-[9.5px] uppercase text-[#4B5563]">
+                    <th className="py-1.5 px-2 font-medium">Record / Quantity</th>
+                    <th className="py-1.5 px-2 font-medium text-right">Value ± Uncertainty</th>
+                    <th className="py-1.5 px-2 font-medium text-right">Rel. (%)</th>
+                    <th className="py-1.5 px-2 font-medium">Uncertainty Type</th>
+                    <th className="py-1.5 px-2 font-medium">Source &amp; Assumptions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E5E7EB]">
+                  {(effectiveExperiment.uncertaintyRecords ?? []).map((u) => {
+                    const relPct =
+                      u.value !== null && u.uncertaintyValue !== null
+                        ? convertToRelativeUncertainty(u.value, u.uncertaintyValue)
+                        : null;
+                    return (
+                      <tr key={u.id}>
+                        <td className="py-1 px-2">
+                          <div className="font-mono font-medium">{u.measurementLabel}</div>
+                          <div className="text-[#4B5563]">{u.quantityName}</div>
+                        </td>
+                        <td className="py-1 px-2 text-right font-mono tabular-nums">
+                          {formatScientificNumber(u.value, 3)} ±{' '}
+                          {formatScientificNumber(u.uncertaintyValue, 4)} {u.unit}
+                        </td>
+                        <td className="py-1 px-2 text-right font-mono tabular-nums">
+                          {relPct !== null
+                            ? `${formatScientificNumber(relPct, 2)}%`
+                            : '—'}
+                        </td>
+                        <td className="py-1 px-2 font-medium text-[#0F52BA]">
+                          {formatUncertaintyTypeLabel(u.uncertaintyType, u.coverageFactor)}
+                        </td>
+                        <td className="py-1 px-2 text-[#4B5563]">
+                          {u.source || '—'}
+                          {u.conditions ? ` · ${u.conditions}` : ''}
+                          {u.notes ? ` · ${u.notes}` : ''}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div className="text-[10px] text-[#6B7280]">
+                Externally supplied and mathematically propagated uncertainty records preserve distinct uncertainty types (Sample SD, SEM, Standard Uncertainty u, Expanded Uncertainty U = k·u, Manufacturer Spec) and do not assert ISO/GUM laboratory accreditation.
+              </div>
+            </section>
+          )}
+
+        {/* Phase 6: Cross-Experiment & Research Matrix Summary */}
+        {(reportConfig.includeCrossExperimentSummary ||
+          reportConfig.includeResearchMatrix) &&
+          crossExperimentPool.length > 0 && (
+            <section className="print-avoid-break space-y-2 pt-2 border-t border-[#D1D5DB]">
+              <h3 className="text-[11px] uppercase tracking-[0.07em] font-semibold text-[#4B5563]">
+                13. Cross-Experiment Portfolio &amp; Research Comparison Matrix Summary
+              </h3>
+              {isViewingFinalized && (
+                <div className="text-[10px] text-[#4B5563] bg-[#F8F9FA] border border-[#D1D5DB] px-2.5 py-1.5">
+                  {hasFrozenComparisonSnapshots ? (
+                    <>
+                      <strong>Frozen Cross-Experiment Snapshots:</strong> This finalized report is locked to its bound experiment snapshot ({boundSnapshot ? `${boundSnapshot.snapshotId} · ${boundSnapshot.name}` : 'Frozen Snapshot'}) plus {Math.max(0, crossExperimentPool.length - 1)} frozen companion experiment snapshot(s) captured at finalization time. Subsequent edits or deletions in the live workspace will not alter this comparison.
+                    </>
+                  ) : (
+                    <>
+                      <strong>Historical Snapshot Isolation:</strong> This finalized report is locked to its bound experiment snapshot ({boundSnapshot ? `${boundSnapshot.snapshotId} · ${boundSnapshot.name}` : 'Frozen Snapshot'}). Unsnapshotted live workspace experiments are excluded from legacy finalized report views to guarantee historical reproducibility.
+                    </>
+                  )}
+                </div>
+              )}
+              <table className="w-full text-left border-collapse text-[10px] border border-[#D1D5DB]">
+                <thead>
+                  <tr className="bg-[#F3F4F6] border-b border-[#D1D5DB] text-[9.5px] uppercase text-[#4B5563]">
+                    <th className="py-1.5 px-2 font-medium">Exp ID</th>
+                    <th className="py-1.5 px-2 font-medium">Support / Precursor</th>
+                    <th className="py-1.5 px-2 font-medium text-right">Target SL (m²/L)</th>
+                    <th className="py-1.5 px-2 font-medium text-right">Survey Datasets</th>
+                    <th className="py-1.5 px-2 font-medium text-right">Analytical Sessions</th>
+                    <th className="py-1.5 px-2 font-medium">Provenance / Review</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E5E7EB]">
+                  {crossExperimentPool.map((exp) => (
+                    <tr key={exp.uuid}>
+                      <td className="py-1 px-2 font-mono font-semibold text-[#0F52BA]">
+                        {exp.experimentId}
+                      </td>
+                      <td className="py-1 px-2 text-[#374151]">
+                        {exp.batch.supportSnapshot?.supportData?.name ?? '—'} /{' '}
+                        {exp.batch.precursorSnapshot?.precursorData?.name ?? '—'}
+                      </td>
+                      <td className="py-1 px-2 text-right font-mono tabular-nums">
+                        {formatScientificNumber(exp.batch.plannedSurfaceLoadingM2L, 1)}
+                      </td>
+                      <td className="py-1 px-2 text-right font-mono tabular-nums">
+                        {exp.surveyDatasets.length}
+                      </td>
+                      <td className="py-1 px-2 text-right font-mono tabular-nums">
+                        {(exp.analyticalSessions ?? []).length}
+                      </td>
+                      <td className="py-1 px-2 text-[#4B5563]">
+                        {exp.isDemonstration ? 'Synthetic Demo' : 'Research Record'} ·{' '}
+                        {exp.scientificReviewStatus}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
 
         {/* Snapshot & Reproducibility Provenance Block */}
         {(reportConfig.includeSnapshotMetadata || activeFinalizedReport) && (

@@ -31,6 +31,7 @@ import {
   ExperimentSnapshotPayload,
   ExperimentalObservation,
   FigureConfiguration,
+  FinalizedReport,
   InstrumentMeasurement,
   MeasurementValueQualifier,
   Precursor,
@@ -1997,6 +1998,111 @@ export function restoreSnapshotAsIndependentExperiment(
   return projectExperimentCompatibilityMirrors(restored);
 }
 
+/**
+ * Captures immutable companion experiment snapshots for all cross-experiment
+ * comparisons and portfolio summaries referenced or visible at report finalization.
+ */
+export function captureCrossExperimentSnapshotsForReport(
+  primaryExperiment: Experiment | ExperimentSnapshotPayload,
+  allExperiments: Experiment[],
+  reportConfig: ReportConfiguration,
+  meta: {
+    capturedAt?: string;
+    researcher?: string;
+    idGenerator: (prefix: string) => string;
+  }
+): ExperimentSnapshot[] {
+  const capturedAt = meta.capturedAt ?? new Date().toISOString();
+  const includeAllPortfolio = Boolean(
+    reportConfig.includeCrossExperimentSummary ||
+      reportConfig.includeResearchMatrix
+  );
+  const referencedUuids = new Set<string>(
+    (primaryExperiment.datasetComparison?.selectedRefs ?? []).map(
+      (r) => r.experimentUuid
+    )
+  );
+
+  const snapshots: ExperimentSnapshot[] = [];
+  for (const candidate of allExperiments) {
+    if (candidate.uuid === primaryExperiment.uuid) continue;
+    const isReferenced = referencedUuids.has(candidate.uuid);
+    if (!includeAllPortfolio && !isReferenced) continue;
+    snapshots.push(
+      createExperimentSnapshotRecord(candidate, {
+        snapshotId: meta.idGenerator('snapx'),
+        name: `Cross-Experiment Freeze — ${candidate.experimentId}`,
+        description: `Immutable companion snapshot captured for cross-experiment reproducibility during report finalization (${candidate.experimentId}).`,
+        researcher:
+          meta.researcher || candidate.researcher || 'Research Scientist',
+        capturedAt,
+      })
+    );
+  }
+  return snapshots;
+}
+
+export interface FinalizedReportResolvedContext {
+  effectiveExperiment: Experiment;
+  crossExperimentPool: Experiment[];
+  boundSnapshot: ExperimentSnapshot | null;
+  hasFrozenComparisonSnapshots: boolean;
+}
+
+/**
+ * Resolves the authoritative experiment and cross-experiment pool for rendering
+ * either a live working report or a finalized snapshot-bound report.
+ * Finalized reports never read companion data from live `allExperiments`.
+ */
+export function resolveFinalizedReportContext(
+  experiment: Experiment,
+  finalizedReport: FinalizedReport | null,
+  allExperiments: Experiment[] = []
+): FinalizedReportResolvedContext {
+  if (!finalizedReport) {
+    const livePool = allExperiments.length > 0 ? allExperiments : [experiment];
+    return {
+      effectiveExperiment: experiment,
+      crossExperimentPool: livePool,
+      boundSnapshot: null,
+      hasFrozenComparisonSnapshots: false,
+    };
+  }
+
+  const boundSnapshot =
+    (experiment.snapshots ?? []).find(
+      (s) => s.snapshotId === finalizedReport.snapshotId
+    ) ?? null;
+
+  const effectiveExperiment: Experiment = boundSnapshot
+    ? {
+        ...boundSnapshot.payload,
+        snapshots: experiment.snapshots,
+        finalizedReports: experiment.finalizedReports,
+        reportConfig: finalizedReport.reportConfig,
+      }
+    : experiment;
+
+  const hasFrozenComparisonSnapshots = Array.isArray(
+    finalizedReport.crossExperimentSnapshots
+  );
+
+  const frozenCompanions: Experiment[] = hasFrozenComparisonSnapshots
+    ? finalizedReport.crossExperimentSnapshots!.map((snap) => ({
+        ...snap.payload,
+        snapshots: [],
+        finalizedReports: [],
+      }))
+    : [];
+
+  return {
+    effectiveExperiment,
+    crossExperimentPool: [effectiveExperiment, ...frozenCompanions],
+    boundSnapshot,
+    hasFrozenComparisonSnapshots,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 8.2 Wall-Clock Recovery for Multiple Independent Research Timers
 // ---------------------------------------------------------------------------
@@ -2075,6 +2181,8 @@ export const REPORT_SECTION_LABELS: Record<ReportSectionId, string> = {
   interpretations_conclusions: 'Researcher Interpretations & Conclusions',
   references: 'Scientific References',
   snapshot_provenance: 'Snapshot & Reproducibility Metadata',
+  cross_experiment_analytics: 'Cross-Experiment Analytics & Comparison Matrix',
+  measurement_uncertainty: 'Recorded Measurement Uncertainty & Assumptions',
 };
 
 export const REPORT_TYPE_PRESETS: Record<

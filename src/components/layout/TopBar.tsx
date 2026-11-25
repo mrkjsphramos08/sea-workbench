@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import {
+  BookOpen,
   Check,
   FolderOpen,
   PanelLeftClose,
@@ -9,6 +10,7 @@ import {
   Plus,
   Printer,
   Save,
+  Search,
   AlertCircle,
 } from 'lucide-react';
 import { Experiment, ExperimentStatus } from '../../domain/models/types';
@@ -53,6 +55,8 @@ export function TopBar({
   onOpenLoadRun,
   onPrintReport,
   onOpenOverview,
+  onOpenSearch,
+  onOpenDocumentation,
 }: {
   activeExperiment: Experiment | null;
   sidebarCollapsed: boolean;
@@ -66,6 +70,8 @@ export function TopBar({
   onOpenLoadRun: () => void;
   onPrintReport: () => void;
   onOpenOverview?: () => void;
+  onOpenSearch?: () => void;
+  onOpenDocumentation?: () => void;
 }) {
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const displayedTitle =
@@ -109,7 +115,7 @@ export function TopBar({
       </div>
 
       {/* Center: Active Experiment ID + Editable Title + Status */}
-      <div className="flex-1 min-w-0 max-w-2xl flex items-center justify-center gap-2">
+      <div className="flex-1 min-w-0 max-w-2xl flex items-center justify-center gap-2 overflow-hidden">
         {activeExperiment ? (
           <>
             <button
@@ -135,7 +141,7 @@ export function TopBar({
                   e.currentTarget.blur();
                 }
               }}
-              className="flex-1 min-w-[140px] h-8 px-2 text-[13px] font-medium text-[#111827] bg-transparent border border-transparent hover:border-[#D1D5DB] focus:bg-white focus:border-[#0F52BA] rounded-[6px] truncate transition-colors"
+              className="flex-1 min-w-[60px] h-8 px-2 text-[13px] font-medium text-[#111827] bg-transparent border border-transparent hover:border-[#D1D5DB] focus:bg-white focus:border-[#0F52BA] rounded-[6px] truncate transition-colors"
             />
             <select
               aria-label="Active experiment status"
@@ -143,7 +149,7 @@ export function TopBar({
               onChange={(e) =>
                 onUpdateStatus(e.target.value as ExperimentStatus)
               }
-              className="h-8 px-2 text-[12px] font-medium text-[#4B5563] bg-[#F3F4F6] border border-[#E5E7EB] hover:border-[#D1D5DB] focus:bg-white focus:border-[#0F52BA] rounded-[6px] shrink-0 cursor-pointer"
+              className="h-8 px-2 text-[12px] font-medium text-[#4B5563] bg-[#F3F4F6] border border-[#E5E7EB] hover:border-[#D1D5DB] focus:bg-white focus:border-[#0F52BA] rounded-[6px] shrink-0 cursor-pointer max-w-[130px] truncate"
             >
               {STATUS_OPTIONS.map((st) => (
                 <option key={st} value={st}>
@@ -162,7 +168,7 @@ export function TopBar({
       {/* Right: Functional Actions + Save State */}
       <div className="flex items-center gap-1.5 shrink-0">
         <span
-          className="hidden xl:inline-flex items-center gap-1 text-[11px] font-mono tabular-nums text-[#6B7280] mr-1 whitespace-nowrap"
+          className="hidden 2xl:inline-flex items-center gap-1 text-[11px] font-mono tabular-nums text-[#6B7280] mr-1 whitespace-nowrap"
           aria-live="polite"
         >
           {saveStatus === 'error' ? (
@@ -181,6 +187,19 @@ export function TopBar({
         </span>
 
         <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => onOpenSearch?.()}
+          title="Search all workspace records (Ctrl+K / Cmd+K)"
+        >
+          <Search className="w-3.5 h-3.5" strokeWidth={1.75} />
+          <span className="hidden sm:inline">Search</span>
+          <span className="hidden xl:inline font-mono text-[10px] text-[#6B7280] ml-1">
+            ⌘K
+          </span>
+        </Button>
+
+        <Button
           variant="primary"
           size="sm"
           onClick={onOpenNewExperiment}
@@ -197,7 +216,7 @@ export function TopBar({
           title="Save workspace immediately to local storage"
         >
           <Save className="w-3.5 h-3.5" strokeWidth={1.75} />
-          <span className="hidden md:inline">Save Run</span>
+          <span className="hidden xl:inline">Save Run</span>
         </Button>
 
         <Button
@@ -207,7 +226,7 @@ export function TopBar({
           title="Import or export JSON workspace backup"
         >
           <FolderOpen className="w-3.5 h-3.5" strokeWidth={1.75} />
-          <span className="hidden md:inline">Load Run</span>
+          <span className="hidden xl:inline">Load Run</span>
         </Button>
 
         <Button
@@ -218,7 +237,17 @@ export function TopBar({
           title="Open A4 Lab Report and print"
         >
           <Printer className="w-3.5 h-3.5" strokeWidth={1.75} />
-          <span className="hidden lg:inline">Print Report</span>
+          <span className="hidden xl:inline">Print Report</span>
+        </Button>
+
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => onOpenDocumentation?.()}
+          title="Open Researcher User Guide, Statistical Scope & Release Notes"
+        >
+          <BookOpen className="w-3.5 h-3.5" strokeWidth={1.75} />
+          <span className="hidden lg:inline">Guide &amp; Scope</span>
         </Button>
       </div>
     </header>

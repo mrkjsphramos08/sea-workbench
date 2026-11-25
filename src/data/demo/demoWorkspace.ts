@@ -8,8 +8,12 @@ import {
   FigureConfiguration,
   FinalizedReport,
   MaterialSnapshot,
+  MeasurementUncertaintyRecord,
   Precursor,
+  ResearchAnalysisSnapshot,
   ResearchAnnotation,
+  ResearchComparisonConfiguration,
+  ResearchMatrixConfiguration,
   ResearchMilestone,
   ResearchProject,
   ResearchTimer,
@@ -20,11 +24,16 @@ import {
   WORKSPACE_SCHEMA_VERSION,
   WorkspaceStateData,
 } from '../../domain/models/types';
+import {
+  DEFAULT_RESEARCH_MATRIX_COLUMNS,
+  createDefaultResearchScopeFilter,
+} from '../../domain/calculations/researchAnalytics';
 import { createDefaultFigureConfig } from '../../domain/calculations/surveyAnalysis';
 import {
   DEFAULT_REPORT_SECTION_ORDER,
   buildAnalyticalAnalysisProvenance,
   buildSurveyAnalysisProvenance,
+  captureCrossExperimentSnapshotsForReport,
   createDefaultResearchPlan,
   createExperimentSnapshotRecord,
 } from '../../domain/calculations/workflowEngine';
@@ -782,6 +791,7 @@ export function createBlankExperiment(params: {
     ],
     snapshots: [],
     finalizedReports: [],
+    uncertaintyRecords: [],
     benchChecklist: [],
     benchTimer: {
       elapsedMs: 0,
@@ -825,6 +835,12 @@ export function createBlankExperiment(params: {
       includeDilutionRecords: true,
       includeAnalyticalQualityReview: true,
       includeSurveyAnalyticalLinks: true,
+      includeCrossExperimentSummary: true,
+      includeResearchMatrix: true,
+      includeAdvancedStatistics: true,
+      includeMeasurementUncertainty: true,
+      includeCompatibilityLimitations: true,
+      includeAnalysisAssumptions: true,
       includeDataQualityLimitations: true,
       includeResearchInterpretations: true,
       includeScientificReferences: true,
@@ -974,6 +990,13 @@ export function duplicateExperimentRecord(
   ];
   clone.snapshots = [];
   clone.finalizedReports = [];
+  clone.uncertaintyRecords = (source.uncertaintyRecords ?? []).map((u) => ({
+    ...u,
+    id: generateUuid('unc'),
+    experimentUuid: newExpUuid,
+    createdAt: now,
+    updatedAt: now,
+  }));
   clone.benchChecklist = clone.benchChecklist.map((item) => ({
     ...item,
     id: generateUuid('chk'),
@@ -2634,6 +2657,12 @@ export function createInitialDemoWorkspace(): WorkspaceStateData {
       includeDilutionRecords: true,
       includeAnalyticalQualityReview: true,
       includeSurveyAnalyticalLinks: true,
+      includeCrossExperimentSummary: true,
+      includeResearchMatrix: true,
+      includeAdvancedStatistics: true,
+      includeMeasurementUncertainty: true,
+      includeCompatibilityLimitations: true,
+      includeAnalysisAssumptions: true,
       includeDataQualityLimitations: true,
       includeResearchInterpretations: true,
       includeScientificReferences: true,
@@ -2833,19 +2862,187 @@ export function createInitialDemoWorkspace(): WorkspaceStateData {
   ];
   demoBatchExp.reportConfig.reportType = 'research-planning';
 
+  const demoUncertaintyRecords: MeasurementUncertaintyRecord[] = [
+    {
+      id: 'unc-demo-01',
+      experimentUuid: 'exp-demo-001',
+      targetKind: 'survey_measurement',
+      measurementId: 'sm-demo-5',
+      measurementLabel: 'UPT-05 (pH 10.5 Replicate R1)',
+      quantityName: 'Recorded Metal Uptake (Γ)',
+      value: 1.74,
+      unit: 'µmol/m²',
+      uncertaintyValue: 0.06,
+      uncertaintyUnit: 'µmol/m²',
+      uncertaintyType: 'standard_uncertainty',
+      source: 'Propagated mass & ICP-OES concentration uncertainty (Demo Fixture)',
+      reference: 'Synthetic Demo Calculation Note UNC-01',
+      conditions: '22 °C, 1000 m²/L, 1 h equilibration',
+      coverageFactor: 1,
+      provenance: 'synthetic_demo',
+      reviewStatus: 'Demonstration Fixture',
+      notes: 'Synthetic standard uncertainty (1σ) attached to UPT-05 for demonstration of error-bar and propagation tools.',
+      createdAt: demoCreatedAt,
+      updatedAt: demoUpdatedAt,
+    },
+    {
+      id: 'unc-demo-02',
+      experimentUuid: 'exp-demo-001',
+      targetKind: 'survey_measurement',
+      measurementId: 'sm-demo-5b',
+      measurementLabel: 'UPT-05B (pH 10.5 Replicate R2)',
+      quantityName: 'Recorded Metal Uptake (Γ)',
+      value: 1.7,
+      unit: 'µmol/m²',
+      uncertaintyValue: 0.12,
+      uncertaintyUnit: 'µmol/m²',
+      uncertaintyType: 'expanded_uncertainty',
+      source: 'Expanded uncertainty (k = 2) demonstration fixture',
+      reference: 'Synthetic Demo Calculation Note UNC-02',
+      conditions: '22 °C, 1000 m²/L, coverage factor k = 2',
+      coverageFactor: 2,
+      provenance: 'synthetic_demo',
+      reviewStatus: 'Demonstration Fixture',
+      notes: 'Illustrates explicit distinction between standard uncertainty (1σ) and expanded uncertainty (U = k·u_c).',
+      createdAt: demoCreatedAt,
+      updatedAt: demoUpdatedAt,
+    },
+    {
+      id: 'unc-demo-03',
+      experimentUuid: 'exp-demo-001',
+      targetKind: 'survey_measurement',
+      measurementId: 'sm-demo-3',
+      measurementLabel: 'UPT-03 (pH 7.5 Replicate R1)',
+      quantityName: 'Recorded Metal Uptake (Γ)',
+      value: 1.12,
+      unit: 'µmol/m²',
+      uncertaintyValue: 0.05,
+      uncertaintyUnit: 'µmol/m²',
+      uncertaintyType: 'sample_sd',
+      source: 'Replicate sample SD record (Demo Fixture)',
+      reference: 'GRP-PH07 Replicate Group',
+      conditions: 'n = 2 valid replicates (UPT-03X excluded)',
+      coverageFactor: null,
+      provenance: 'synthetic_demo',
+      reviewStatus: 'Demonstration Fixture',
+      notes: 'Recorded sample standard deviation across valid pH 7.5 replicates.',
+      createdAt: demoCreatedAt,
+      updatedAt: demoUpdatedAt,
+    },
+    {
+      id: 'unc-demo-04',
+      experimentUuid: 'exp-demo-001',
+      targetKind: 'material_property',
+      measurementId: 'supp-demo-sio2-bet',
+      measurementLabel: 'Amorphous Silica Grade S-300 — BET Surface Area',
+      quantityName: 'BET Specific Surface Area',
+      value: 300.0,
+      unit: 'm²/g',
+      uncertaintyValue: 6.5,
+      uncertaintyUnit: 'm²/g',
+      uncertaintyType: 'manufacturer_reported',
+      source: 'Supplier lot characterization datasheet (Synthetic Fixture)',
+      reference: 'ref-supp-1',
+      conditions: 'N2 physisorption at 77 K',
+      coverageFactor: null,
+      provenance: 'synthetic_demo',
+      reviewStatus: 'Demonstration Fixture',
+      notes: 'Manufacturer-reported uncertainty interval for specific surface area.',
+      createdAt: demoCreatedAt,
+      updatedAt: demoUpdatedAt,
+    },
+  ];
+
+  demoExperiment.uncertaintyRecords = demoUncertaintyRecords;
+
+  const demoScopeWithSynthetic = {
+    ...createDefaultResearchScopeFilter(true),
+  };
+
+  const defaultComparisonConfig: ResearchComparisonConfiguration = {
+    id: 'rcmp-demo-01',
+    name: 'Pt/SiO2 Multi-Series Uptake Comparison (Demo)',
+    description:
+      'Compares recorded Pt uptake across 1000 m²/L and 500 m²/L synthetic survey datasets with explicit surface-loading condition notes.',
+    quantityKey: 'uptake_umol_m2',
+    scope: demoScopeWithSynthetic,
+    selectedExperimentUuids: [demoExperiment.uuid],
+    selectedSurveyDatasetIds: ['ds-demo-upt-1', 'ds-demo-upt-2'],
+    selectedAnalyticalSessionIds: [],
+    excludeFlaggedMeasurements: true,
+    errorBarMode: 'sd',
+    sourceContentHash: '',
+    calcEngineVersion: CALC_ENGINE_VERSION,
+    createdAt: demoCreatedAt,
+    updatedAt: demoUpdatedAt,
+  };
+
+  const defaultMatrixConfig: ResearchMatrixConfiguration = {
+    id: 'rmtx-demo-01',
+    name: 'Portfolio Survey Dataset Matrix (Demo)',
+    description:
+      'Structured comparison matrix of survey datasets with quartiles, IQR, MAD, material reference properties, and review status.',
+    granularity: 'survey_dataset',
+    quantityKey: 'uptake_umol_m2',
+    columns: [...DEFAULT_RESEARCH_MATRIX_COLUMNS],
+    sortColumn: 'recordId',
+    sortDirection: 'asc',
+    searchQuery: '',
+    scope: demoScopeWithSynthetic,
+    sourceContentHash: '',
+    calcEngineVersion: CALC_ENGINE_VERSION,
+    createdAt: demoCreatedAt,
+    updatedAt: demoUpdatedAt,
+  };
+
+  const defaultAnalysisSnapshot: ResearchAnalysisSnapshot = {
+    id: 'ras-demo-01',
+    title: 'Baseline Pt/SiO2 Cross-Series Uptake Analysis Record (Demo)',
+    analysisKind: 'cross_experiment_comparison',
+    scope: demoScopeWithSynthetic,
+    includedExperimentUuids: [demoExperiment.uuid],
+    includedSurveyDatasetIds: ['ds-demo-upt-1', 'ds-demo-upt-2'],
+    includedAnalyticalSessionIds: ['as-demo-icp-01'],
+    includedMeasurementIds: ['sm-demo-1', 'sm-demo-2', 'sm-demo-3', 'sm-demo-3b', 'sm-demo-4', 'sm-demo-5', 'sm-demo-5b'],
+    exclusionRulesSummary: 'User-excluded rows omitted; flagged rows excluded from descriptive stats.',
+    unitSummary: 'µmol/m² (uptake), pH (acidity), ppm (ICP-OES concentration)',
+    provenanceSummary: ['synthetic_demo'],
+    scientificReviewStatus: 'Demonstration Fixture',
+    containsSyntheticData: true,
+    sourceContentHash: '',
+    calcEngineVersion: CALC_ENGINE_VERSION,
+    capturedAt: demoUpdatedAt,
+    summaryNotes:
+      'Demonstration reproducible analysis snapshot recording exact scope, inclusion rules, units, and calc engine version.',
+  };
+
+  const projectedDemoBatchExp = projectExperimentCompatibilityMirrors(demoBatchExp);
+  let demoCrossSnapSeq = 0;
+  demoFinalizedReport.crossExperimentSnapshots =
+    captureCrossExperimentSnapshotsForReport(
+      snap2.payload,
+      [demoExperiment, projectedDemoBatchExp],
+      demoExperimentBase.reportConfig,
+      {
+        capturedAt: demoUpdatedAt,
+        researcher: 'Dr. E. Lindqvist (Demo)',
+        idGenerator: (prefix) => `${prefix}-demo-${++demoCrossSnapSeq}`,
+      }
+    );
+
   return {
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
     appVersion: APP_VERSION,
     projects: [demoProject],
-    experiments: [
-      demoExperiment,
-      projectExperimentCompatibilityMirrors(demoBatchExp),
-    ],
+    experiments: [demoExperiment, projectedDemoBatchExp],
     activeExperimentUuid: demoExperiment.uuid,
     precursors: demoPrecursors,
     supports: demoSupports,
     importMappingTemplates: createDefaultImportMappingTemplates(),
     experimentTemplates: createDefaultExperimentTemplates(),
+    researchComparisonConfigs: [defaultComparisonConfig],
+    researchMatrixConfigs: [defaultMatrixConfig],
+    researchAnalysisSnapshots: [defaultAnalysisSnapshot],
     preferences: {
       sidebarCollapsed: false,
       defaultResearcher: 'Research Scientist',

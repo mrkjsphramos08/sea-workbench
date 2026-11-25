@@ -436,4 +436,4 @@ export function evaluateAnalyticalBoundary(
 }
 
 export * from './workflowEngine';
-
+export * from './researchAnalytics';

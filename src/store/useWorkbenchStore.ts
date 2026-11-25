@@ -35,12 +35,17 @@ import {
   InstrumentImportRecord,
   InstrumentMeasurement,
   InstrumentType,
+  MeasurementUncertaintyRecord,
   OverviewWorkspaceTab,
   Precursor,
   ReferencePzcMarker,
   ReplicateGroupMeta,
   ReportConfiguration,
+  ResearchAnalysisSnapshot,
+  ResearchAnalyticsTab,
   ResearchAnnotation,
+  ResearchComparisonConfiguration,
+  ResearchMatrixConfiguration,
   ResearchMilestone,
   ResearchPlanMetadata,
   ResearchProject,
@@ -59,6 +64,7 @@ import { projectExperimentCompatibilityMirrors } from '../domain/models/projecti
 import {
   buildAnalyticalAnalysisProvenance,
   buildSurveyAnalysisProvenance,
+  captureCrossExperimentSnapshotsForReport,
   createDefaultResearchPlan,
   createExperimentSnapshotRecord,
   restoreSnapshotAsIndependentExperiment,
@@ -94,6 +100,7 @@ export interface NavigationContextState {
   overviewTab: OverviewWorkspaceTab;
   surveyTab: string | null;
   analyticalTab: string | null;
+  analyticsTab: ResearchAnalyticsTab;
   highlightRecordId: string | null;
   navigationNonce: number;
 }
@@ -111,7 +118,7 @@ export interface WorkbenchStore extends WorkspaceStateData {
     message: string;
   } | null;
 
-  // Phase 5 Cross-Module Navigation
+  // Phase 5 & Phase 6 Cross-Module Navigation
   navigateToContext: (target: {
     module: ActiveModule;
     experimentUuid?: string;
@@ -120,9 +127,11 @@ export interface WorkbenchStore extends WorkspaceStateData {
     overviewTab?: OverviewWorkspaceTab;
     surveyTab?: string;
     analyticalTab?: string;
+    analyticsTab?: ResearchAnalyticsTab;
     highlightRecordId?: string;
   }) => void;
   setOverviewTab: (tab: OverviewWorkspaceTab) => void;
+  setAnalyticsTab: (tab: ResearchAnalyticsTab) => void;
   markBackupExported: () => void;
 
   // Lifecycle & persistence
@@ -665,6 +674,39 @@ export interface WorkbenchStore extends WorkspaceStateData {
   ) => FinalizedReport | null;
   deleteFinalizedReport: (uuid: string, reportId: string) => void;
 
+  // Phase 6 Measurement Uncertainty & Research Analytics Configurations
+  addUncertaintyRecord: (
+    uuid: string,
+    input: Omit<
+      MeasurementUncertaintyRecord,
+      'id' | 'experimentUuid' | 'createdAt' | 'updatedAt'
+    >
+  ) => MeasurementUncertaintyRecord | null;
+  updateUncertaintyRecord: (
+    uuid: string,
+    recordId: string,
+    patch: Partial<MeasurementUncertaintyRecord>
+  ) => void;
+  deleteUncertaintyRecord: (uuid: string, recordId: string) => void;
+  saveResearchComparisonConfig: (
+    config: Omit<
+      ResearchComparisonConfiguration,
+      'id' | 'createdAt' | 'updatedAt'
+    > & { id?: string }
+  ) => ResearchComparisonConfiguration;
+  deleteResearchComparisonConfig: (configId: string) => void;
+  saveResearchMatrixConfig: (
+    config: Omit<
+      ResearchMatrixConfiguration,
+      'id' | 'createdAt' | 'updatedAt'
+    > & { id?: string }
+  ) => ResearchMatrixConfiguration;
+  deleteResearchMatrixConfig: (configId: string) => void;
+  saveResearchAnalysisSnapshot: (
+    snapshot: Omit<ResearchAnalysisSnapshot, 'id' | 'capturedAt'>
+  ) => ResearchAnalysisSnapshot;
+  deleteResearchAnalysisSnapshot: (snapshotId: string) => void;
+
   // Workspace Import / Reset
   replaceWorkspace: (workspace: WorkspaceStateData) => void;
   getSerializableWorkspace: () => WorkspaceStateData;
@@ -681,6 +723,9 @@ function extractWorkspaceData(state: WorkbenchStore): WorkspaceStateData {
     supports: state.supports,
     importMappingTemplates: state.importMappingTemplates ?? [],
     experimentTemplates: state.experimentTemplates ?? [],
+    researchComparisonConfigs: state.researchComparisonConfigs ?? [],
+    researchMatrixConfigs: state.researchMatrixConfigs ?? [],
+    researchAnalysisSnapshots: state.researchAnalysisSnapshots ?? [],
     preferences: state.preferences,
     hasInitializedDemo: state.hasInitializedDemo,
     lastSavedAt: state.lastSavedAt,
@@ -815,6 +860,9 @@ const initialBlankState: WorkspaceStateData = {
   supports: [],
   importMappingTemplates: [],
   experimentTemplates: [],
+  researchComparisonConfigs: [],
+  researchMatrixConfigs: [],
+  researchAnalysisSnapshots: [],
   preferences: {
     sidebarCollapsed: false,
     defaultResearcher: 'Research Scientist',
@@ -852,6 +900,7 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
     overviewTab: 'summary',
     surveyTab: null,
     analyticalTab: null,
+    analyticsTab: 'overview',
     highlightRecordId: null,
     navigationNonce: 0,
   },
@@ -908,6 +957,8 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
           surveyTab: target.surveyTab ?? state.navigationContext.surveyTab,
           analyticalTab:
             target.analyticalTab ?? state.navigationContext.analyticalTab,
+          analyticsTab:
+            target.analyticsTab ?? state.navigationContext.analyticsTab,
           highlightRecordId: target.highlightRecordId ?? null,
           navigationNonce: state.navigationContext.navigationNonce + 1,
         },
@@ -921,6 +972,14 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
       navigationContext: {
         ...state.navigationContext,
         overviewTab: tab,
+      },
+    })),
+
+  setAnalyticsTab: (tab) =>
+    set((state) => ({
+      navigationContext: {
+        ...state.navigationContext,
+        analyticsTab: tab,
       },
     })),
 
@@ -3959,6 +4018,17 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
       boundSnapshot = createdNewSnapshot;
     }
 
+    const crossExperimentSnapshots = captureCrossExperimentSnapshotsForReport(
+      boundSnapshot.payload,
+      get().experiments,
+      exp.reportConfig,
+      {
+        capturedAt: now,
+        researcher: exp.researcher || 'Research Scientist',
+        idGenerator: generateUuid,
+      }
+    );
+
     const report: FinalizedReport = {
       id: generateUuid('frep'),
       versionNumber: nextVersion,
@@ -3973,6 +4043,7 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
       scientificReviewStatus: boundSnapshot.scientificReviewStatus,
       reportConfig: structuredClone(exp.reportConfig),
       notes: input.notes?.trim() ?? '',
+      crossExperimentSnapshots,
     };
 
     set((state) => ({
@@ -4017,6 +4088,160 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
     schedulePersist(get, set);
   },
 
+  addUncertaintyRecord: (uuid, input) => {
+    const exp = get().experiments.find((e) => e.uuid === uuid);
+    if (!exp) return null;
+    const now = new Date().toISOString();
+    const record: MeasurementUncertaintyRecord = {
+      ...input,
+      id: generateUuid('unc'),
+      experimentUuid: uuid,
+      createdAt: now,
+      updatedAt: now,
+    };
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) => ({
+        ...e,
+        uncertaintyRecords: [record, ...(e.uncertaintyRecords ?? [])],
+      })),
+      statusBanner: {
+        type: 'success',
+        message: `Recorded ${record.uncertaintyType} uncertainty for ${record.measurementLabel}.`,
+      },
+    }));
+    schedulePersist(get, set);
+    return record;
+  },
+
+  updateUncertaintyRecord: (uuid, recordId, patch) => {
+    const now = new Date().toISOString();
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) => ({
+        ...e,
+        uncertaintyRecords: (e.uncertaintyRecords ?? []).map((u) =>
+          u.id === recordId ? { ...u, ...patch, updatedAt: now } : u
+        ),
+      })),
+    }));
+    schedulePersist(get, set);
+  },
+
+  deleteUncertaintyRecord: (uuid, recordId) => {
+    set((state) => ({
+      experiments: updateExperimentInList(state.experiments, uuid, (e) => ({
+        ...e,
+        uncertaintyRecords: (e.uncertaintyRecords ?? []).filter(
+          (u) => u.id !== recordId
+        ),
+      })),
+    }));
+    schedulePersist(get, set);
+  },
+
+  saveResearchComparisonConfig: (input) => {
+    const now = new Date().toISOString();
+    const existing = (get().researchComparisonConfigs ?? []).find(
+      (c) => c.id === input.id
+    );
+    const saved: ResearchComparisonConfiguration = {
+      ...input,
+      id: existing ? existing.id : input.id || generateUuid('rcmp'),
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now,
+    };
+    set((state) => {
+      const list = state.researchComparisonConfigs ?? [];
+      const next = existing
+        ? list.map((c) => (c.id === saved.id ? saved : c))
+        : [saved, ...list];
+      return {
+        researchComparisonConfigs: next,
+        statusBanner: {
+          type: 'success',
+          message: `Saved comparison configuration "${saved.name}".`,
+        },
+      };
+    });
+    schedulePersist(get, set);
+    return saved;
+  },
+
+  deleteResearchComparisonConfig: (configId) => {
+    set((state) => ({
+      researchComparisonConfigs: (state.researchComparisonConfigs ?? []).filter(
+        (c) => c.id !== configId
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  saveResearchMatrixConfig: (input) => {
+    const now = new Date().toISOString();
+    const existing = (get().researchMatrixConfigs ?? []).find(
+      (c) => c.id === input.id
+    );
+    const saved: ResearchMatrixConfiguration = {
+      ...input,
+      id: existing ? existing.id : input.id || generateUuid('rmtx'),
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now,
+    };
+    set((state) => {
+      const list = state.researchMatrixConfigs ?? [];
+      const next = existing
+        ? list.map((c) => (c.id === saved.id ? saved : c))
+        : [saved, ...list];
+      return {
+        researchMatrixConfigs: next,
+        statusBanner: {
+          type: 'success',
+          message: `Saved matrix configuration "${saved.name}".`,
+        },
+      };
+    });
+    schedulePersist(get, set);
+    return saved;
+  },
+
+  deleteResearchMatrixConfig: (configId) => {
+    set((state) => ({
+      researchMatrixConfigs: (state.researchMatrixConfigs ?? []).filter(
+        (c) => c.id !== configId
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
+  saveResearchAnalysisSnapshot: (input) => {
+    const now = new Date().toISOString();
+    const saved: ResearchAnalysisSnapshot = {
+      ...input,
+      id: generateUuid('ras'),
+      capturedAt: now,
+    };
+    set((state) => ({
+      researchAnalysisSnapshots: [
+        saved,
+        ...(state.researchAnalysisSnapshots ?? []),
+      ],
+      statusBanner: {
+        type: 'success',
+        message: `Captured reproducible analysis snapshot "${saved.title}".`,
+      },
+    }));
+    schedulePersist(get, set);
+    return saved;
+  },
+
+  deleteResearchAnalysisSnapshot: (snapshotId) => {
+    set((state) => ({
+      researchAnalysisSnapshots: (state.researchAnalysisSnapshots ?? []).filter(
+        (s) => s.id !== snapshotId
+      ),
+    }));
+    schedulePersist(get, set);
+  },
+
   replaceWorkspace: (workspace) => {
     const validActive = workspace.experiments.some(
       (e) => e.uuid === workspace.activeExperimentUuid
@@ -4033,6 +4258,9 @@ export const useWorkbenchStore = create<WorkbenchStore>((set, get) => ({
         workspace.experimentTemplates && workspace.experimentTemplates.length > 0
           ? workspace.experimentTemplates
           : createDefaultExperimentTemplates(),
+      researchComparisonConfigs: workspace.researchComparisonConfigs ?? [],
+      researchMatrixConfigs: workspace.researchMatrixConfigs ?? [],
+      researchAnalysisSnapshots: workspace.researchAnalysisSnapshots ?? [],
       hasInitializedDemo: true,
     };
     const saved = saveWorkspaceToStorage(normalized);

@@ -236,6 +236,8 @@ export function suggestCsvColumnMappings(headers: string[]): CsvColumnMapping[] 
     } else if (
       normalized === 'initial_concentration' ||
       normalized === 'initial_conc' ||
+      normalized === 'initial_conc_ppm' ||
+      normalized === 'initial_concentration_ppm' ||
       normalized === 'c0' ||
       normalized === 'c_0' ||
       normalized === 'ci'
@@ -244,6 +246,8 @@ export function suggestCsvColumnMappings(headers: string[]): CsvColumnMapping[] 
     } else if (
       normalized === 'final_concentration' ||
       normalized === 'final_conc' ||
+      normalized === 'final_conc_ppm' ||
+      normalized === 'final_concentration_ppm' ||
       normalized === 'cf' ||
       normalized === 'c_f'
     ) {

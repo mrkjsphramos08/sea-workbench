@@ -20,6 +20,7 @@ import {
   ValidationResult,
   validateBackupEnvelope,
 } from '../../domain/validation/validators';
+import { sanitizeSpreadsheetCell } from '../../domain/calculations/researchAnalytics';
 
 export function serializeWorkspaceBackup(
   workspace: WorkspaceStateData
@@ -84,7 +85,10 @@ export function serializeExperimentSnapshotJson(
 
 function escapeCsvCell(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return '';
-  const str = String(value);
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : '';
+  }
+  const str = sanitizeSpreadsheetCell(String(value));
   if (/[",\r\n]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }
@@ -924,6 +928,8 @@ export function triggerFileDownload(
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+export const triggerTextDownload = triggerFileDownload;
+
 export interface FigureExportOptions {
   title?: string;
   subtitle?: string;
@@ -942,9 +948,24 @@ export function buildStandaloneChartSvgString(
   options: FigureExportOptions = {}
 ): { svgString: string; width: number; height: number } | null {
   if (!container || typeof window === 'undefined') return null;
-  const svg =
-    container.querySelector('svg.recharts-surface') ||
+
+  let svg: SVGSVGElement | null =
+    container.querySelector('.recharts-wrapper > svg.recharts-surface') ||
     container.querySelector('svg[data-figure-canvas="true"]');
+
+  if (!svg) {
+    const candidates = Array.from(
+      container.querySelectorAll('svg.recharts-surface')
+    ).filter((el) => !el.closest('.recharts-legend-wrapper'));
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => {
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        return rb.width * rb.height - ra.width * ra.height;
+      });
+      svg = candidates[0] as SVGSVGElement;
+    }
+  }
   if (!svg) return null;
 
   const rect = svg.getBoundingClientRect();
@@ -1013,7 +1034,7 @@ export function buildStandaloneChartSvgString(
     notice.setAttribute('x', '20');
     notice.setAttribute('y', String(headerH + plotH + 16));
     notice.setAttribute('fill', '#92400E');
-    notice.setAttribute('font-size', '10.5');
+    notice.setAttribute('font-size', plotW < 780 ? '9.5' : '10.5');
     notice.setAttribute('font-family', 'IBM Plex Mono, monospace');
     notice.textContent =
       'SYNTHETIC DEMONSTRATION DATA — Exploratory numerical visualization only; not validated experimental evidence.';

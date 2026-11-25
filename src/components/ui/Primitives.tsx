@@ -516,3 +516,161 @@ export function ConfirmDialog({
     </Modal>
   );
 }
+
+export function Badge({
+  children,
+  variant = 'neutral',
+  className = '',
+}: {
+  children: React.ReactNode;
+  variant?:
+    | 'neutral'
+    | 'info'
+    | 'success'
+    | 'valid'
+    | 'warning'
+    | 'demo'
+    | 'danger'
+    | 'error';
+  className?: string;
+}) {
+  const tone = {
+    neutral: 'text-[#4B5563] bg-[#F3F4F6] border-[#E5E7EB]',
+    info: 'text-[#0F52BA] bg-[#EFF6FF] border-[#BFDBFE]',
+    success: 'text-[#065F46] bg-[#ECFDF5] border-[#A7F3D0]',
+    valid: 'text-[#065F46] bg-[#ECFDF5] border-[#A7F3D0]',
+    warning: 'text-[#92400E] bg-[#FFFBEB] border-[#FDE68A]',
+    demo: 'text-[#92400E] bg-[#FFFBEB] border-[#FDE68A]',
+    danger: 'text-[#991B1B] bg-[#FEF2F2] border-[#FECACA]',
+    error: 'text-[#991B1B] bg-[#FEF2F2] border-[#FECACA]',
+  }[variant];
+
+  return (
+    <span
+      className={`inline-flex items-center px-1.5 py-0.5 text-[11px] font-medium leading-none border rounded-[4px] whitespace-nowrap ${tone} ${className}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+export function Card({
+  children,
+  className = '',
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <section
+      className={`bg-white border border-[#E5E7EB] rounded-[8px] ${className}`}
+    >
+      {children}
+    </section>
+  );
+}
+
+export function CardHeader({
+  title,
+  subtitle,
+  action,
+}: {
+  title: string;
+  subtitle?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[#E5E7EB]">
+      <div className="min-w-0">
+        <h2 className="text-[13px] font-semibold text-[#111827] leading-tight">
+          {title}
+        </h2>
+        {subtitle && (
+          <p className="text-[12px] text-[#6B7280] mt-0.5 leading-snug">
+            {subtitle}
+          </p>
+        )}
+      </div>
+      {action && <div className="flex items-center gap-2 shrink-0">{action}</div>}
+    </div>
+  );
+}
+
+export function CardBody({
+  children,
+  className = '',
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return <div className={`p-4 ${className}`}>{children}</div>;
+}
+
+export function Label({
+  children,
+  htmlFor,
+  className = '',
+}: {
+  children: React.ReactNode;
+  htmlFor?: string;
+  className?: string;
+}) {
+  return (
+    <label
+      htmlFor={htmlFor}
+      className={`block text-[11px] uppercase tracking-[0.05em] font-medium text-[#4B5563] mb-1 ${className}`}
+    >
+      {children}
+    </label>
+  );
+}
+
+export function Input({
+  className = '',
+  ...props
+}: React.InputHTMLAttributes<HTMLInputElement>) {
+  return <input {...props} className={`${inputBaseClass} ${className}`} />;
+}
+
+export function Select({
+  className = '',
+  children,
+  ...props
+}: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select {...props} className={`${inputBaseClass} ${className}`}>
+      {children}
+    </select>
+  );
+}
+
+export function NoticeBanner({
+  title,
+  children,
+  variant = 'info',
+  className = '',
+}: {
+  title?: string;
+  children: React.ReactNode;
+  variant?: 'info' | 'warning' | 'danger' | 'error' | 'success' | 'valid';
+  className?: string;
+}) {
+  const tone = {
+    info: 'bg-[#EFF6FF] border-[#BFDBFE] text-[#1E3A8A]',
+    warning: 'bg-[#FFFBEB] border-[#FDE68A] text-[#92400E]',
+    danger: 'bg-[#FEF2F2] border-[#FECACA] text-[#991B1B]',
+    error: 'bg-[#FEF2F2] border-[#FECACA] text-[#991B1B]',
+    success: 'bg-[#ECFDF5] border-[#A7F3D0] text-[#065F46]',
+    valid: 'bg-[#ECFDF5] border-[#A7F3D0] text-[#065F46]',
+  }[variant];
+
+  return (
+    <div
+      className={`px-3.5 py-2.5 border rounded-[6px] text-[12px] leading-relaxed ${tone} ${className}`}
+    >
+      {title && <div className="font-semibold mb-0.5">{title}</div>}
+      <div>{children}</div>
+    </div>
+  );
+}
+

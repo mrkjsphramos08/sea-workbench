@@ -29,10 +29,15 @@ import {
   analyzeCalibrationDataset,
   analyzeSurveyDataset,
   buildConsolidatedReviewItems,
+  buildDataDrivenAnalyticalFigureSvg,
+  buildDataDrivenSurveyFigureSvg,
   buildExperimentTimeline,
   buildUnifiedSampleRegistry,
+  computeAdvancedDescriptiveStatistics,
   detectAnalyticalQualityIssues,
+  exportUncertaintyRecordsCsv,
 } from '../../domain/calculations/seaMath';
+import { sanitizeSpreadsheetCell } from '../../domain/calculations/researchAnalytics';
 import {
   exportAnalyticalSessionSamplesCsv,
   exportCalibrationDatasetCsv,
@@ -58,28 +63,108 @@ function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-function buildMinimalSummarySvg(params: {
-  title: string;
-  subtitle: string;
-  footer: string;
-}): string {
-  const esc = (s: string) =>
-    s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  return [
-    `<?xml version="1.0" encoding="UTF-8"?>`,
-    `<svg xmlns="http://www.w3.org/2000/svg" width="840" height="220" viewBox="0 0 840 220">`,
-    `  <rect width="840" height="220" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1"/>`,
-    `  <rect x="0" y="0" width="840" height="4" fill="#0F52BA"/>`,
-    `  <text x="28" y="48" font-family="IBM Plex Sans, sans-serif" font-size="18" font-weight="600" fill="#111827">${esc(params.title)}</text>`,
-    `  <text x="28" y="78" font-family="IBM Plex Mono, monospace" font-size="12" fill="#4B5563">${esc(params.subtitle)}</text>`,
-    `  <text x="28" y="132" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#6B7280">Figure configuration and source dataset identifiers are stored in the adjacent JSON file for exact re-rendering in SEA Workbench.</text>`,
-    `  <text x="28" y="188" font-family="IBM Plex Mono, monospace" font-size="11" fill="#6B7280">${esc(params.footer)}</text>`,
-    `</svg>`,
-  ].join('\n');
+function buildAdvancedStatisticsCsvForExperiment(exp: Experiment): string {
+  const headers = [
+    'recordKind',
+    'recordId',
+    'title',
+    'quantity',
+    'unit',
+    'count',
+    'missingOrNullCount',
+    'excludedCount',
+    'mean',
+    'sd',
+    'sem',
+    'q1',
+    'median_q2',
+    'q3',
+    'iqr',
+    'mad',
+    'p5',
+    'p10',
+    'p25',
+    'p50',
+    'p75',
+    'p90',
+    'p95',
+    'min',
+    'max',
+    'lowerFence_1_5_iqr',
+    'upperFence_1_5_iqr',
+    'outsideFenceCount',
+    'quantileConvention',
+  ];
+
+  const rows: string[][] = [];
+  for (const ds of exp.surveyDatasets ?? []) {
+    const validRows = (ds.measurements ?? []).filter(
+      (m) => m.qualityStatus !== 'excluded_by_user'
+    );
+    const excludedCount = (ds.measurements ?? []).length - validRows.length;
+    const uptakeRes = computeAdvancedDescriptiveStatistics(
+      validRows.map((r) => r.recordedUptakeUmolM2),
+      {
+        unit: 'µmol/m²',
+        containsSynthetic: ds.isDemonstration || exp.isDemonstration,
+        excludedCount,
+      }
+    ).data;
+    const phRes = computeAdvancedDescriptiveStatistics(
+      validRows.map((r) => r.measuredFinalPh),
+      {
+        unit: 'pH',
+        containsSynthetic: ds.isDemonstration || exp.isDemonstration,
+        excludedCount,
+      }
+    ).data;
+
+    for (const [qty, unit, st] of [
+      ['Recorded Metal Uptake', 'µmol/m²', uptakeRes] as const,
+      ['Measured Final pH', 'pH', phRes] as const,
+    ]) {
+      if (!st) continue;
+      rows.push([
+        'SurveyDataset',
+        ds.datasetId,
+        ds.title,
+        qty,
+        unit,
+        String(st.count),
+        String(st.missingOrNullCount),
+        String(st.excludedCount),
+        st.mean !== null ? st.mean.toFixed(4) : '',
+        st.sampleStandardDeviation !== null ? st.sampleStandardDeviation.toFixed(4) : '',
+        st.standardErrorOfMean !== null ? st.standardErrorOfMean.toFixed(4) : '',
+        st.q1 !== null ? st.q1.toFixed(4) : '',
+        st.q2 !== null ? st.q2.toFixed(4) : '',
+        st.q3 !== null ? st.q3.toFixed(4) : '',
+        st.iqr !== null ? st.iqr.toFixed(4) : '',
+        st.mad !== null ? st.mad.toFixed(4) : '',
+        st.percentiles.p5 !== null ? st.percentiles.p5.toFixed(4) : '',
+        st.percentiles.p10 !== null ? st.percentiles.p10.toFixed(4) : '',
+        st.percentiles.p25 !== null ? st.percentiles.p25.toFixed(4) : '',
+        st.percentiles.p50 !== null ? st.percentiles.p50.toFixed(4) : '',
+        st.percentiles.p75 !== null ? st.percentiles.p75.toFixed(4) : '',
+        st.percentiles.p90 !== null ? st.percentiles.p90.toFixed(4) : '',
+        st.percentiles.p95 !== null ? st.percentiles.p95.toFixed(4) : '',
+        st.min !== null ? st.min.toFixed(4) : '',
+        st.max !== null ? st.max.toFixed(4) : '',
+        st.boxPlotSummary.lowerFence !== null ? st.boxPlotSummary.lowerFence.toFixed(4) : '',
+        st.boxPlotSummary.upperFence !== null ? st.boxPlotSummary.upperFence.toFixed(4) : '',
+        String(st.boxPlotSummary.outsideFenceValues.length),
+        st.quantileConvention,
+      ]);
+    }
+  }
+
+  const esc = (v: string) => {
+    const safe = sanitizeSpreadsheetCell(String(v ?? ''));
+    return safe.includes(',') || safe.includes('"') || safe.includes('\n') || safe.includes('\r')
+      ? `"${safe.replace(/"/g, '""')}"`
+      : safe;
+  };
+  return [headers.map(esc).join(','), ...rows.map((r) => r.map(esc).join(','))].join('\n');
 }
 
 export interface BuiltResearchPackage {
@@ -212,13 +297,9 @@ export function buildResearchExportPackage(
       );
       addTextFile(
         `figures/survey_${figSlug}.svg`,
-        buildMinimalSummarySvg({
-          title: fig.title || fig.name,
-          subtitle: `Survey Dataset: ${ds.datasetId} · Plot: ${fig.plotType} · Units: ${fig.xAxisUnit} / ${fig.yAxisUnit}`,
-          footer: `SEA Workbench v${APP_VERSION} · ${exp.experimentId} · Saved ${fig.savedAt}`,
-        }),
+        buildDataDrivenSurveyFigureSvg(exp, ds, fig),
         'image/svg+xml',
-        `Vector provenance card for saved survey figure "${fig.name}".`
+        `Data-rendered vector SVG plot for saved survey figure "${fig.name}".`
       );
     }
   }
@@ -285,16 +366,34 @@ export function buildResearchExportPackage(
       );
       addTextFile(
         `figures/analytical_${figSlug}.svg`,
-        buildMinimalSummarySvg({
-          title: fig.title || fig.name,
-          subtitle: `Analytical Session: ${sess.sessionId} (${sess.technique}) · Plot: ${fig.plotType}`,
-          footer: `SEA Workbench v${APP_VERSION} · ${exp.experimentId} · Exploratory Numerical Analysis`,
-        }),
+        buildDataDrivenAnalyticalFigureSvg(exp, sess, fig),
         'image/svg+xml',
-        `Vector provenance card for saved analytical figure "${fig.name}".`
+        `Data-rendered vector SVG plot for saved analytical figure "${fig.name}".`
       );
     }
   }
+
+  // Phase 6: Advanced Descriptive Statistics (Quartiles, IQR, MAD, Percentiles) & Measurement Uncertainty
+  addTextFile(
+    'analytics/advanced_descriptive_statistics.csv',
+    buildAdvancedStatisticsCsvForExperiment(exp),
+    'text/csv',
+    'Phase 6 advanced descriptive statistics (Q1, Median, Q3, IQR, MAD, P5..P95, and 1.5xIQR fences).'
+  );
+
+  addTextFile(
+    'analytics/uncertainty_records.csv',
+    exportUncertaintyRecordsCsv(exp.uncertaintyRecords ?? []),
+    'text/csv',
+    'Recorded externally supplied measurement uncertainty metadata (preserving distinct uncertainty types).'
+  );
+
+  addTextFile(
+    'analytics/uncertainty_records.json',
+    JSON.stringify(exp.uncertaintyRecords ?? [], null, 2),
+    'application/json',
+    'Structured measurement uncertainty records with explicit uncertainty types, coverage factors, and sources.'
+  );
 
   // Optional live DOM-captured SVGs passed by caller
   for (const cap of options?.capturedSvgFigures ?? []) {
@@ -476,13 +575,16 @@ export function buildResearchExportPackage(
     ],
   };
 
-  const manifestJson = JSON.stringify(manifest, null, 2);
-  manifest.includedFiles.push({
+  const selfEntry: ResearchExportManifestFile = {
     path: 'manifest.json',
     mimeType: 'application/json',
-    bytes: utf8ByteLength(manifestJson),
+    bytes: 0,
     description: 'Machine-readable research package manifest.',
-  });
+  };
+  manifest.includedFiles.push(selfEntry);
+  for (let pass = 0; pass < 3; pass += 1) {
+    selfEntry.bytes = utf8ByteLength(JSON.stringify(manifest, null, 2));
+  }
   const finalManifestJson = JSON.stringify(manifest, null, 2);
   zipEntries.push({ path: 'manifest.json', content: finalManifestJson });
 

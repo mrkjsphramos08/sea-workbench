@@ -56,6 +56,7 @@ const PLOT_TYPE_OPTIONS: { value: FigurePlotType; label: string }[] = [
   { value: 'pzc_final_vs_initial', label: 'PZC: Final pH vs. Initial pH (1:1)' },
   { value: 'pzc_delta_vs_initial', label: 'PZC: ΔpH vs. Initial pH (ΔpH=0)' },
   { value: 'distribution', label: 'Descriptive Distribution (Bins)' },
+  { value: 'box_plot', label: 'Box Plot & Quartile Summary (Q1/Median/Q3/1.5×IQR)' },
   { value: 'comparative', label: 'Comparative Multi-Dataset Overlay' },
 ];
 

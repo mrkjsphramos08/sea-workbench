@@ -1,7 +1,7 @@
-export const APP_VERSION = '0.5.0';
-export const WORKSPACE_SCHEMA_VERSION = '5.0.0';
-export const EXPERIMENT_DATA_VERSION = '5.0.0';
-export const CALC_ENGINE_VERSION = '0.5.0-phase5-integrated-workflow';
+export const APP_VERSION = '1.0.0-rc.2';
+export const WORKSPACE_SCHEMA_VERSION = '6.0.0';
+export const EXPERIMENT_DATA_VERSION = '6.0.0';
+export const CALC_ENGINE_VERSION = '1.0.0-rc.2-release-candidate';
 
 export type ActiveModule =
   | 'library'
@@ -11,6 +11,7 @@ export type ActiveModule =
   | 'analytical'
   | 'bench-runner'
   | 'lab-report'
+  | 'research-analytics'
   | 'databases';
 
 export type ExperimentType =
@@ -217,7 +218,7 @@ export interface BatchConfiguration {
 
 export type SurveyMode = 'uptake' | 'pzc';
 export type ChartDisplayMode = 'individual' | 'means' | 'both';
-export type ErrorBarMode = 'none' | 'sd' | 'sem';
+export type ErrorBarMode = 'none' | 'sd' | 'sem' | 'recorded_uncertainty';
 export type SurveyDatasetStatus = 'Active' | 'Archived';
 export type SurveyWorkspaceTab =
   | 'overview'
@@ -299,7 +300,8 @@ export type FigurePlotType =
   | 'comparative'
   | 'pzc_final_vs_initial'
   | 'pzc_delta_vs_initial'
-  | 'distribution';
+  | 'distribution'
+  | 'box_plot';
 
 export type MarkerShape = 'circle' | 'square' | 'triangle' | 'diamond' | 'cross';
 export type LineStyle = 'solid' | 'dashed' | 'dotted';
@@ -981,6 +983,8 @@ export type ReportSectionId =
   | 'survey_datasets'
   | 'analytical_sessions'
   | 'quality_review'
+  | 'cross_experiment_analytics'
+  | 'measurement_uncertainty'
   | 'interpretations_conclusions'
   | 'references'
   | 'snapshot_provenance';
@@ -1015,6 +1019,13 @@ export interface ReportConfiguration {
   includeDilutionRecords?: boolean;
   includeAnalyticalQualityReview?: boolean;
   includeSurveyAnalyticalLinks?: boolean;
+  /** Phase 6 research analytics and uncertainty report sections */
+  includeCrossExperimentSummary?: boolean;
+  includeResearchMatrix?: boolean;
+  includeAdvancedStatistics?: boolean;
+  includeMeasurementUncertainty?: boolean;
+  includeCompatibilityLimitations?: boolean;
+  includeAnalysisAssumptions?: boolean;
   includeDataQualityLimitations: boolean;
   includeResearchInterpretations: boolean;
   includeScientificReferences: boolean;
@@ -1031,6 +1042,236 @@ export interface ReportConfiguration {
   selectedAnalyticalFigureIds?: string[];
   institutionHeader: string;
   reportFooterNote: string;
+}
+
+export type UncertaintyType =
+  | 'sample_sd'
+  | 'sem'
+  | 'standard_uncertainty'
+  | 'expanded_uncertainty'
+  | 'researcher_reported'
+  | 'manufacturer_reported'
+  | 'unknown';
+
+export type UncertaintyRecordTargetKind =
+  | 'survey_measurement'
+  | 'analytical_measurement'
+  | 'batch_parameter'
+  | 'material_property'
+  | 'general_quantity';
+
+export interface MeasurementUncertaintyRecord {
+  id: string;
+  experimentUuid: string;
+  targetKind: UncertaintyRecordTargetKind;
+  /** Stable internal measurement ID or parameter key */
+  measurementId: string;
+  measurementLabel: string;
+  quantityName: string;
+  value: number | null;
+  unit: string;
+  uncertaintyValue: number | null;
+  uncertaintyUnit: string;
+  uncertaintyType: UncertaintyType;
+  source: string;
+  reference: string;
+  conditions: string;
+  coverageFactor: number | null;
+  provenance: DataProvenance;
+  reviewStatus: ScientificReviewStatus;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UncertaintyPropagationTerm {
+  id: string;
+  label: string;
+  symbol: string;
+  value: number;
+  unit: string;
+  standardUncertainty: number;
+  uncertaintyType: UncertaintyType;
+  /** Linear coefficient c_i for y = sum(c_i * x_i) or exponent p_i for y = k * prod(x_i^p_i) */
+  coefficientOrExponent: number;
+  sourceNote: string;
+}
+
+export interface UncertaintyCorrelationPair {
+  termIdA: string;
+  termIdB: string;
+  correlationCoefficient: number;
+}
+
+export type ResearchAnalyticsTab =
+  | 'overview'
+  | 'comparison'
+  | 'uncertainty'
+  | 'matrix';
+
+export type ResearchScopeMode =
+  | 'all_experiments'
+  | 'selected_project'
+  | 'selected_experiments'
+  | 'selected_survey_datasets'
+  | 'selected_analytical_sessions';
+
+export interface ResearchScopeFilter {
+  mode: ResearchScopeMode;
+  projectIds: string[];
+  experimentUuids: string[];
+  surveyDatasetIds: string[];
+  analyticalSessionIds: string[];
+  dateFrom: string;
+  dateTo: string;
+  supportIds: string[];
+  precursorIds: string[];
+  experimentTypes: ExperimentType[];
+  statuses: ExperimentStatus[];
+  reviewStatuses: ScientificReviewStatus[];
+  provenances: DataProvenance[];
+  /** Exclude synthetic demonstration fixtures by default unless researcher enables */
+  includeSyntheticDemo: boolean;
+}
+
+export type AnalysisStalenessStatus =
+  | 'saved_current'
+  | 'requires_regeneration'
+  | 'source_unavailable';
+
+export type ComparisonQuantityKey =
+  | 'uptake_umol_m2'
+  | 'final_ph'
+  | 'delta_ph'
+  | 'initial_conc_ppm'
+  | 'final_conc_ppm'
+  | 'reported_conc'
+  | 'surface_loading_m2_l'
+  | 'metal_loading_wt_pct';
+
+export interface ResearchComparisonConfiguration {
+  id: string;
+  name: string;
+  description: string;
+  quantityKey: ComparisonQuantityKey;
+  scope: ResearchScopeFilter;
+  selectedExperimentUuids: string[];
+  selectedSurveyDatasetIds: string[];
+  selectedAnalyticalSessionIds: string[];
+  excludeFlaggedMeasurements: boolean;
+  errorBarMode: ErrorBarMode;
+  sourceContentHash: string;
+  calcEngineVersion: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ResearchMatrixGranularity =
+  | 'experiment'
+  | 'survey_dataset'
+  | 'analytical_session';
+
+export type ResearchMatrixColumnId =
+  | 'recordId'
+  | 'title'
+  | 'recordKind'
+  | 'projectCode'
+  | 'experimentType'
+  | 'status'
+  | 'reviewStatus'
+  | 'provenance'
+  | 'experimentDate'
+  | 'supportName'
+  | 'supportBetM2G'
+  | 'supportPzc'
+  | 'precursorName'
+  | 'precursorMetal'
+  | 'surfaceLoadingM2L'
+  | 'temperatureC'
+  | 'observationCount'
+  | 'validCount'
+  | 'missingOrQualifiedCount'
+  | 'meanValue'
+  | 'sdValue'
+  | 'semValue'
+  | 'medianValue'
+  | 'iqrValue'
+  | 'madValue'
+  | 'minMaxRange'
+  | 'unitLabel'
+  | 'openQualityIssues'
+  | 'uncertaintyRecordsCount';
+
+export interface ResearchMatrixConfiguration {
+  id: string;
+  name: string;
+  description: string;
+  granularity: ResearchMatrixGranularity;
+  quantityKey: ComparisonQuantityKey;
+  columns: ResearchMatrixColumnId[];
+  sortColumn: ResearchMatrixColumnId;
+  sortDirection: 'asc' | 'desc';
+  searchQuery: string;
+  scope: ResearchScopeFilter;
+  sourceContentHash: string;
+  calcEngineVersion: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResearchAnalysisSnapshot {
+  id: string;
+  title: string;
+  analysisKind: 'cross_experiment_comparison' | 'research_matrix' | 'uncertainty_propagation' | 'descriptive_statistics';
+  scope: ResearchScopeFilter;
+  includedExperimentUuids: string[];
+  includedSurveyDatasetIds: string[];
+  includedAnalyticalSessionIds: string[];
+  includedMeasurementIds: string[];
+  exclusionRulesSummary: string;
+  unitSummary: string;
+  provenanceSummary: DataProvenance[];
+  scientificReviewStatus: ScientificReviewStatus;
+  containsSyntheticData: boolean;
+  sourceContentHash: string;
+  calcEngineVersion: string;
+  capturedAt: string;
+  summaryNotes: string;
+}
+
+export type WorkspaceSearchCategory =
+  | 'project'
+  | 'experiment'
+  | 'support'
+  | 'precursor'
+  | 'survey_dataset'
+  | 'analytical_session'
+  | 'sample'
+  | 'measurement'
+  | 'observation'
+  | 'reference'
+  | 'interpretation'
+  | 'figure'
+  | 'snapshot'
+  | 'report';
+
+export interface WorkspaceSearchResult {
+  id: string;
+  category: WorkspaceSearchCategory;
+  categoryLabel: string;
+  title: string;
+  subtitle: string;
+  experimentUuid: string | null;
+  experimentIdLabel: string | null;
+  projectId: string | null;
+  projectLabel: string | null;
+  matchingSnippet: string;
+  provenance: DataProvenance;
+  isAvailable: boolean;
+  targetModule: ActiveModule;
+  targetDatasetId?: string | null;
+  targetSessionId?: string | null;
+  targetRecordId?: string | null;
 }
 
 export type ExperimentSnapshotPayload = Omit<
@@ -1065,6 +1306,12 @@ export interface FinalizedReport {
   scientificReviewStatus: ScientificReviewStatus;
   reportConfig: ReportConfiguration;
   notes: string;
+  /**
+   * Immutable companion experiment snapshots captured at report finalization time
+   * so cross-experiment comparisons and Section 13 summaries remain reproducible
+   * even if live workspace experiments are later edited or deleted.
+   */
+  crossExperimentSnapshots?: ExperimentSnapshot[];
 }
 
 export interface ResearchExportManifestFile {
@@ -1150,6 +1397,8 @@ export interface Experiment {
   snapshots?: ExperimentSnapshot[];
   /** Phase 5 immutable snapshot-bound finalized reports */
   finalizedReports?: FinalizedReport[];
+  /** Phase 6 recorded externally supplied measurement uncertainty metadata */
+  uncertaintyRecords?: MeasurementUncertaintyRecord[];
   reportConfig: ReportConfiguration;
 }
 
@@ -1169,6 +1418,12 @@ export interface WorkspaceStateData {
   supports: Support[];
   importMappingTemplates?: ImportMappingTemplate[];
   experimentTemplates?: ExperimentTemplate[];
+  /** Phase 6 saved cross-experiment comparison configurations */
+  researchComparisonConfigs?: ResearchComparisonConfiguration[];
+  /** Phase 6 saved research comparison matrix configurations */
+  researchMatrixConfigs?: ResearchMatrixConfiguration[];
+  /** Phase 6 saved reproducible research analysis snapshots */
+  researchAnalysisSnapshots?: ResearchAnalysisSnapshot[];
   preferences: UserPreferences;
   hasInitializedDemo: boolean;
   lastSavedAt: string | null;

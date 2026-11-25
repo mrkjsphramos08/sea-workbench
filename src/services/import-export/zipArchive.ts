@@ -209,3 +209,86 @@ export function listZipEntries(zipBytes: Uint8Array): ParsedZipEntryInfo[] {
 
   return entries;
 }
+
+/**
+ * Extracts a specific entry's raw bytes from a STORE (method 0) PKZIP buffer
+ * and verifies its IEEE 802.3 CRC-32 checksum.
+ */
+export function extractZipEntryBytes(
+  zipBytes: Uint8Array,
+  targetPath: string
+): Uint8Array | null {
+  const cleanTarget = targetPath.replace(/^\/+/, '');
+  const view = new DataView(
+    zipBytes.buffer,
+    zipBytes.byteOffset,
+    zipBytes.byteLength
+  );
+  const decoder = new TextDecoder('utf-8');
+
+  let eocdOffset = -1;
+  for (let i = zipBytes.length - 22; i >= Math.max(0, zipBytes.length - 65557); i -= 1) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) {
+    throw new Error('Invalid ZIP archive: End of Central Directory signature not found.');
+  }
+
+  const totalEntries = view.getUint16(eocdOffset + 10, true);
+  const centralOffset = view.getUint32(eocdOffset + 16, true);
+
+  let cursor = centralOffset;
+  for (let i = 0; i < totalEntries; i += 1) {
+    const sig = view.getUint32(cursor, true);
+    if (sig !== 0x02014b50) {
+      throw new Error(`Invalid ZIP central directory signature at entry ${i}.`);
+    }
+    const expectedCrc = view.getUint32(cursor + 16, true);
+    const uncompressedSize = view.getUint32(cursor + 24, true);
+    const nameLen = view.getUint16(cursor + 28, true);
+    const extraLen = view.getUint16(cursor + 30, true);
+    const commentLen = view.getUint16(cursor + 32, true);
+    const localHeaderOffset = view.getUint32(cursor + 42, true);
+    const path = decoder.decode(
+      zipBytes.subarray(cursor + 46, cursor + 46 + nameLen)
+    );
+
+    if (path === cleanTarget) {
+      const localSig = view.getUint32(localHeaderOffset, true);
+      if (localSig !== 0x04034b50) {
+        throw new Error(`Invalid local file header signature for ${path}.`);
+      }
+      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+      const dataBytes = zipBytes.subarray(dataStart, dataStart + uncompressedSize);
+      const actualCrc = computeCrc32(dataBytes);
+      if (actualCrc !== expectedCrc) {
+        throw new Error(
+          `CRC-32 mismatch for ${path}: expected ${expectedCrc.toString(16)}, got ${actualCrc.toString(16)}`
+        );
+      }
+      return dataBytes;
+    }
+
+    cursor += 46 + nameLen + extraLen + commentLen;
+  }
+
+  return null;
+}
+
+/**
+ * Extracts and UTF-8 decodes a specific file entry from a PKZIP buffer.
+ */
+export function extractZipEntryText(
+  zipBytes: Uint8Array,
+  targetPath: string
+): string | null {
+  const bytes = extractZipEntryBytes(zipBytes, targetPath);
+  if (!bytes) return null;
+  return new TextDecoder('utf-8').decode(bytes);
+}
+

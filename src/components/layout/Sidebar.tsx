@@ -3,6 +3,7 @@
 import React from 'react';
 import {
   Activity,
+  BarChart3,
   Beaker,
   Database,
   FileText,
@@ -35,6 +36,7 @@ const NAV_GROUPS: NavGroup[] = [
     heading: 'RESEARCH',
     items: [
       { id: 'library', label: 'Experiment Library', icon: FolderKanban },
+      { id: 'research-analytics', label: 'Research Analytics', icon: BarChart3 },
     ],
   },
   {

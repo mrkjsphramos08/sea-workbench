@@ -16,16 +16,36 @@ import { DilutionStandardsWorkspace } from '../features/analytical/DilutionStand
 import { BenchRunnerWorkspace } from '../features/bench-runner/BenchRunnerWorkspace';
 import { LabReportWorkspace } from '../features/reports/LabReportWorkspace';
 import { DatabasesWorkspace } from '../features/databases/DatabasesWorkspace';
+import { ResearchAnalyticsWorkspace } from '../features/analytics/ResearchAnalyticsWorkspace';
+import { WorkspaceSearchModal } from '../features/search/WorkspaceSearchModal';
+import { DocumentationModal } from '../features/documentation/DocumentationModal';
 
 export function SEAWorkbenchApp() {
   const store = useWorkbenchStore();
   const [newExpOpen, setNewExpOpen] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [docOpen, setDocOpen] = useState(false);
 
   useEffect(() => {
     store.hydrateFromStorage();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      } else if (e.key === 'Escape' && searchOpen) {
+        setSearchOpen(false);
+      } else if (e.key === 'Escape' && docOpen) {
+        setDocOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [searchOpen, docOpen]);
 
   const activeExperiment =
     store.experiments.find((e) => e.uuid === store.activeExperimentUuid) ?? null;
@@ -53,7 +73,9 @@ export function SEAWorkbenchApp() {
   }
 
   const requiresActiveExperiment =
-    store.activeModule !== 'library' && store.activeModule !== 'databases';
+    store.activeModule !== 'library' &&
+    store.activeModule !== 'databases' &&
+    store.activeModule !== 'research-analytics';
 
   return (
     <div className="h-screen overflow-hidden flex flex-col bg-[#F8F9FA] text-[#111827] print:h-auto print:overflow-visible">
@@ -80,12 +102,14 @@ export function SEAWorkbenchApp() {
         onOpenOverview={() =>
           store.navigateToContext({ module: 'overview', overviewTab: 'summary' })
         }
+        onOpenSearch={() => setSearchOpen(true)}
         onOpenNewExperiment={() => setNewExpOpen(true)}
         onSaveRun={() => {
           store.saveNow();
         }}
         onOpenLoadRun={() => setTransferOpen(true)}
         onPrintReport={handlePrintReport}
+        onOpenDocumentation={() => setDocOpen(true)}
       />
 
       <div className="flex-1 flex min-h-0 overflow-hidden print:overflow-visible">
@@ -160,6 +184,10 @@ export function SEAWorkbenchApp() {
                 onUpdateSupport={store.updateSupport}
                 onDeleteSupport={store.deleteSupport}
               />
+            )}
+
+            {store.activeModule === 'research-analytics' && (
+              <ResearchAnalyticsWorkspace />
             )}
 
             {requiresActiveExperiment && !activeExperiment && (
@@ -836,6 +864,16 @@ export function SEAWorkbenchApp() {
         onImportWorkspace={store.replaceWorkspace}
         storageDiagnostics={store.storageDiagnostics}
         onBackupExported={store.markBackupExported}
+      />
+
+      <WorkspaceSearchModal
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+      />
+
+      <DocumentationModal
+        open={docOpen}
+        onClose={() => setDocOpen(false)}
       />
     </div>
   );
